@@ -17,12 +17,12 @@ type ExecutionReceipts interface {
 	// Index indexes an execution receipt by block ID.
 	Index(blockID flow.Identifier, resultID flow.Identifier) error
 
-	// IndexByExecutor indexes an execution receipt by block ID and execution ID
-	IndexByExecutor(receipt *flow.ExecutionReceipt) error
+	// Add2IndexAllBlockReceipts adds the receipt to the index of all receipts for the block
+	Add2IndexAllBlockReceipts(receipt *flow.ExecutionReceipt) error
 
 	// ByBlockID retrieves an execution receipt by block ID.
 	ByBlockID(blockID flow.Identifier) (*flow.ExecutionReceipt, error)
 
-	// ByBlockIDAllExecutionReceipts retrieves all execution receipts for a block ID
-	ByBlockIDAllExecutionReceipts(blockID flow.Identifier) ([]*flow.ExecutionReceipt, error)
+	// GetAllBlockReceipts retrieves all execution receipts for a block ID
+	GetAllBlockReceipts(blockID flow.Identifier) ([]*flow.ExecutionReceipt, error)
 }

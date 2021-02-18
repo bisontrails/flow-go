@@ -18,28 +18,23 @@ func RetrieveExecutionReceiptMeta(receiptID flow.Identifier, meta *flow.Executio
 
 // IndexExecutionReceipt inserts an execution receipt ID keyed by block ID
 func IndexExecutionReceipt(blockID flow.Identifier, receiptID flow.Identifier) func(*badger.Txn) error {
-	return insert(makePrefix(codeBlockExecutionReceipt, blockID), receiptID)
+	return insert(makePrefix(codeOwnBlockReceipt, blockID), receiptID)
 }
 
 // LookupExecutionReceipt finds execution receipt ID by block
 func LookupExecutionReceipt(blockID flow.Identifier, receiptID *flow.Identifier) func(*badger.Txn) error {
-	return retrieve(makePrefix(codeBlockExecutionReceipt, blockID), receiptID)
+	return retrieve(makePrefix(codeOwnBlockReceipt, blockID), receiptID)
 }
 
-// IndexExecutionReceipt inserts an execution receipt ID keyed by block ID and execution ID
-func IndexExecutionReceiptByBlockIDExecutionID(blockID, executorID, receiptID flow.Identifier) func(*badger.Txn) error {
-	return insert(makePrefix(codeExecutionIDExecutionReceipt, blockID, executorID), receiptID)
+// Add2IndexAllBlockReceipts inserts an execution receipt ID keyed by block ID and execution ID
+func Add2IndexAllBlockReceipts(blockID, receiptID flow.Identifier) func(*badger.Txn) error {
+	return insert(makePrefix(codeAllBlockReceipts, blockID, receiptID), receiptID)
 }
 
-// LookupExecutionReceipt finds execution receipt ID by block ID and execution ID
-func LookupExecutionReceiptByBlockIDExecutionID(blockID flow.Identifier, executorID flow.Identifier, receiptID *flow.Identifier) func(*badger.Txn) error {
-	return retrieve(makePrefix(codeExecutionIDExecutionReceipt, blockID, executorID), receiptID)
-}
-
-// LookupExecutionReceipt finds execution receipt ID by block ID for all execution IDs
-func LookupExecutionReceiptByBlockIDAllExecutionIDs(blockID flow.Identifier, receiptIDs *[]flow.Identifier) func(*badger.Txn) error {
+// LookupAllBlockReceipts finds execution receipt ID by block ID for all execution IDs
+func LookupAllBlockReceipts(blockID flow.Identifier, receiptIDs *[]flow.Identifier) func(*badger.Txn) error {
 	iterationFunc := receiptIterationFunc(receiptIDs)
-	return traverse(makePrefix(codeExecutionIDExecutionReceipt, blockID), iterationFunc)
+	return traverse(makePrefix(codeAllBlockReceipts, blockID), iterationFunc)
 }
 
 // receiptIterationFunc returns an in iteration function which returns all receipt IDs found during traversal

@@ -143,40 +143,17 @@ func (r *ExecutionReceipts) Index(blockID, receiptID flow.Identifier) error {
 	})
 }
 
-func (r *ExecutionReceipts) IndexByExecutor(receipt *flow.ExecutionReceipt) error {
+// Add2IndexAllBlockReceipts adds the receipt to the index of all receipts for the block
+func (r *ExecutionReceipts) Add2IndexAllBlockReceipts(receipt *flow.ExecutionReceipt) error {
 	blockID := receipt.ExecutionResult.BlockID
-	executorID := receipt.ExecutorID
 	receiptID := receipt.ID()
 	return operation.RetryOnConflict(r.db.Update, func(tx *badger.Txn) error {
-
-		err := operation.IndexExecutionReceiptByBlockIDExecutionID(blockID, executorID, receiptID)(tx)
-		if err == nil {
-			return nil
-		}
-
-		if !errors.Is(err, storage.ErrAlreadyExists) {
-			return err
-		}
-
-		// when trying to index a receipt for a block, and there is already a receipt indexed for this block,
-		// double check if the indexed receipt is the same
-		var storedReceiptID flow.Identifier
-		err = operation.LookupExecutionReceiptByBlockIDExecutionID(blockID, executorID, &storedReceiptID)(tx)
+		err := operation.SkipDuplicates(operation.Add2IndexAllBlockReceipts(blockID, receiptID))(tx)
+		// operation.SkipDuplicates already handles storage.ErrAlreadyExists
+		// hence, any error we receive here is unexpected
 		if err != nil {
-			return fmt.Errorf("there is a receipt stored already, but cannot retrieve the ID of it: %w", err)
+			return fmt.Errorf("internal error adding receipt %v to index of receipts for block: %w", receiptID, err)
 		}
-
-		_, err = r.byID(storedReceiptID)(tx)
-		if err != nil {
-			return fmt.Errorf("there is a receipt stored already, but cannot retrieve it (stored receiptID: %v): %w", storedReceiptID, err)
-		}
-
-		if storedReceiptID != receiptID {
-			return fmt.Errorf(
-				"storing receipt that is different from the already stored one for block: %v, execution ID: %v, storing receipt: %v, stored receipt: %v, %w",
-				blockID, executorID, receiptID, storedReceiptID, storage.ErrDataMismatch)
-		}
-
 		return nil
 	})
 }
@@ -187,12 +164,13 @@ func (r *ExecutionReceipts) ByBlockID(blockID flow.Identifier) (*flow.ExecutionR
 	return r.byBlockID(blockID)(tx)
 }
 
-func (r *ExecutionReceipts) ByBlockIDAllExecutionReceipts(blockID flow.Identifier) ([]*flow.ExecutionReceipt, error) {
+// GetAllBlockReceipts retrieves all execution receipts for a block ID
+func (r *ExecutionReceipts) GetAllBlockReceipts(blockID flow.Identifier) ([]*flow.ExecutionReceipt, error) {
 	var receipts []*flow.ExecutionReceipt
 	err := r.db.View(func(btx *badger.Txn) error {
 		var receiptIDs []flow.Identifier
 
-		err := operation.LookupExecutionReceiptByBlockIDAllExecutionIDs(blockID, &receiptIDs)(btx)
+		err := operation.LookupAllBlockReceipts(blockID, &receiptIDs)(btx)
 		if err != nil {
 			return fmt.Errorf("could not find receipt index for block: %w", err)
 		}

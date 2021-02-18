@@ -1125,7 +1125,7 @@ func (e *Engine) requestPendingReceipts() (int, uint64, error) {
 		// get finalized, so the returned receipts must be from finalized blocks.
 		// Therefore, the return receipts must be incoporated receipts, which
 		// are safe to be added to the mempool
-		receipts, err := e.receiptsDB.ByBlockIDAllExecutionReceipts(blockID)
+		receipts, err := e.receiptsDB.GetAllBlockReceipts(blockID)
 		if err != nil {
 			return 0, 0, fmt.Errorf("could not get receipts by block ID: %v, %w", blockID, err)
 		}
@@ -1341,7 +1341,7 @@ func (e *Engine) indexReceipts(blockID flow.Identifier) error {
 	}
 
 	for _, receipt := range payload.Receipts {
-		err := e.receiptsDB.IndexByExecutor(receipt)
+		err := e.receiptsDB.Add2IndexAllBlockReceipts(receipt)
 		if err != nil {
 			return fmt.Errorf("could not index receipt by executor, receipt id: %v: %w", receipt.ID(), err)
 		}

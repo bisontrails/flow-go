@@ -124,7 +124,7 @@ func TestReceiptLookupWithBlockIDAllExecutionID(t *testing.T) {
 	t.Run("get empty", func(t *testing.T) {
 		withStore(t, func(store *bstorage.ExecutionReceipts) {
 			block := unittest.BlockFixture()
-			receipts, err := store.ByBlockIDAllExecutionReceipts(block.ID())
+			receipts, err := store.GetAllBlockReceipts(block.ID())
 			require.NoError(t, err)
 			require.Equal(t, empty, receipts)
 		})
@@ -138,10 +138,10 @@ func TestReceiptLookupWithBlockIDAllExecutionID(t *testing.T) {
 			err := store.Store(receipt1)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt1)
+			err = store.Add2IndexAllBlockReceipts(receipt1)
 			require.NoError(t, err)
 
-			receipts, err := store.ByBlockIDAllExecutionReceipts(block.ID())
+			receipts, err := store.GetAllBlockReceipts(block.ID())
 			require.NoError(t, err)
 
 			require.Equal(t, []*flow.ExecutionReceipt{receipt1}, receipts)
@@ -161,16 +161,16 @@ func TestReceiptLookupWithBlockIDAllExecutionID(t *testing.T) {
 			err := store.Store(receipt1)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt1)
+			err = store.Add2IndexAllBlockReceipts(receipt1)
 			require.NoError(t, err)
 
 			err = store.Store(receipt2)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt2)
+			err = store.Add2IndexAllBlockReceipts(receipt2)
 			require.NoError(t, err)
 
-			receipts, err := store.ByBlockIDAllExecutionReceipts(block.ID())
+			receipts, err := store.GetAllBlockReceipts(block.ID())
 			require.NoError(t, err)
 
 			require.ElementsMatch(t, []*flow.ExecutionReceipt{receipt1, receipt2}, receipts)
@@ -191,16 +191,16 @@ func TestReceiptLookupWithBlockIDAllExecutionID(t *testing.T) {
 			err := store.Store(receipt1)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt1)
+			err = store.Add2IndexAllBlockReceipts(receipt1)
 			require.NoError(t, err)
 
 			err = store.Store(receipt2)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt2)
+			err = store.Add2IndexAllBlockReceipts(receipt2)
 			require.NoError(t, err)
 
-			receipts, err := store.ByBlockIDAllExecutionReceipts(block1.ID())
+			receipts, err := store.GetAllBlockReceipts(block1.ID())
 			require.NoError(t, err)
 
 			require.ElementsMatch(t, []*flow.ExecutionReceipt{receipt1}, receipts)
@@ -217,23 +217,23 @@ func TestReceiptLookupWithBlockIDAllExecutionID(t *testing.T) {
 			err := store.Store(receipt1)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt1)
+			err = store.Add2IndexAllBlockReceipts(receipt1)
 			require.NoError(t, err)
 
 			err = store.Store(receipt1)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt1)
+			err = store.Add2IndexAllBlockReceipts(receipt1)
 			require.NoError(t, err)
 
-			receipts, err := store.ByBlockIDAllExecutionReceipts(block1.ID())
+			receipts, err := store.GetAllBlockReceipts(block1.ID())
 			require.NoError(t, err)
 
 			require.ElementsMatch(t, []*flow.ExecutionReceipt{receipt1}, receipts)
 		})
 	})
 
-	t.Run("indexing receipt from the same executor but different result should fail", func(t *testing.T) {
+	t.Run("should support indexing multiple receipts from the same executor for same block", func(t *testing.T) {
 		withStore(t, func(store *bstorage.ExecutionReceipts) {
 			block1 := unittest.BlockFixture()
 
@@ -245,16 +245,16 @@ func TestReceiptLookupWithBlockIDAllExecutionID(t *testing.T) {
 			err := store.Store(receipt1)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt1)
+			err = store.Add2IndexAllBlockReceipts(receipt1)
 			require.NoError(t, err)
 
 			err = store.Store(receipt2)
 			require.NoError(t, err)
 
-			err = store.IndexByExecutor(receipt2)
+			err = store.Add2IndexAllBlockReceipts(receipt2)
 			require.Error(t, err)
 
-			receipts, err := store.ByBlockIDAllExecutionReceipts(block1.ID())
+			receipts, err := store.GetAllBlockReceipts(block1.ID())
 			require.NoError(t, err)
 
 			require.ElementsMatch(t, []*flow.ExecutionReceipt{receipt1}, receipts)
