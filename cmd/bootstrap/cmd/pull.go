@@ -41,7 +41,7 @@ func pull(cmd *cobra.Command, args []string) {
 
 	log.Info().Msgf("attempting to download partner info for network `%s` from bucket `%s`", flagNetwork, flagBucketName)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*45)
 	defer cancel()
 
 	bucket := newGoogleBucket(flagBucketName)
