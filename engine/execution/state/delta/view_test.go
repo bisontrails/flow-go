@@ -11,7 +11,7 @@ import (
 	"github.com/onflow/flow-go/model/flow"
 )
 
-func TestView_Get(t *testing.T) {
+func TestViewGet(t *testing.T) {
 	registerID := "fruit"
 
 	t.Run("ValueNotSet", func(t *testing.T) {
@@ -55,7 +55,7 @@ func TestView_Get(t *testing.T) {
 	})
 }
 
-func TestView_Set(t *testing.T) {
+func TestViewSet(t *testing.T) {
 	registerID := "fruit"
 
 	v := delta.NewView(func(owner, controller, key string) (flow.RegisterValue, error) {
@@ -102,59 +102,70 @@ func TestView_Set(t *testing.T) {
 			assert.Equal(t, v.SpockSecret(), v.Interactions().SpockSecret)
 		})
 
-		registerID1 := "reg1"
+		v = delta.NewView(func(owner, controller, key string) (flow.RegisterValue, error) {
+			return nil, nil
+		})
 
+		registerID1 := "reg1"
 		registerID2 := "reg2"
 		registerID3 := "reg3"
+
+		// prepare the registerID bytes
+		register := flow.NewRegisterID("", "", "")
+		register.Owner = registerID1
+		registerID1Bytes := register.Bytes()
+		register.Owner = registerID2
+		registerID2Bytes := register.Bytes()
+		register.Owner = registerID3
+		registerID3Bytes := register.Bytes()
 
 		// this part checks that spocks ordering be based
 		// on update orders and not registerIDs
 		expSpock := hash.NewSHA3_256()
 		err = v.Set(registerID2, "", "", flow.RegisterValue("1"))
-		assert.NoError(t, err)
-		err = hashIt(expSpock, []byte("1"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID2Bytes)
+		hashIt(t, expSpock, []byte("1"))
 
 		err = v.Set(registerID3, "", "", flow.RegisterValue("2"))
-		assert.NoError(t, err)
-		err = hashIt(expSpock, []byte("2"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID3Bytes)
+		hashIt(t, expSpock, []byte("2"))
 
 		err = v.Set(registerID1, "", "", flow.RegisterValue("3"))
-		assert.NoError(t, err)
-		err = hashIt(expSpock, []byte("3"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID1Bytes)
+		hashIt(t, expSpock, []byte("3"))
 
-		b, err := v.Get(registerID1, "", "")
-		assert.NoError(t, err)
-		err = hashIt(expSpock, []byte("3"))
-		assert.NoError(t, err)
+		_, err := v.Get(registerID1, "", "")
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID1Bytes)
 
-		assert.Equal(t, b, flow.RegisterValue("3"))
-		// this part checks that delete functionality
-		// doesn't impact secret
+		// this part uses the delete functionality
+		// to check that only the register ID is written to the spock secret
 		err = v.Delete(registerID1, "", "")
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID1Bytes)
 
 		// this part checks that it always update the
 		// intermediate values and not just the final values
 		err = v.Set(registerID1, "", "", flow.RegisterValue("4"))
-		assert.NoError(t, err)
-		err = hashIt(expSpock, []byte("4"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID1Bytes)
+		hashIt(t, expSpock, []byte("4"))
 
 		err = v.Set(registerID1, "", "", flow.RegisterValue("5"))
-		assert.NoError(t, err)
-		err = hashIt(expSpock, []byte("5"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID1Bytes)
+		hashIt(t, expSpock, []byte("5"))
 
 		err = v.Set(registerID3, "", "", flow.RegisterValue("6"))
-		assert.NoError(t, err)
-		err = hashIt(expSpock, []byte("6"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		hashIt(t, expSpock, registerID3Bytes)
+		hashIt(t, expSpock, []byte("6"))
 
 		s := v.SpockSecret()
-		assert.Equal(t, s, []uint8(expSpock.SumHash()))
+		assert.Equal(t, hash.Hash(s), expSpock.SumHash())
 
 		t.Run("reflects in the snapshot", func(t *testing.T) {
 			assert.Equal(t, v.SpockSecret(), v.Interactions().SpockSecret)
@@ -207,7 +218,7 @@ func TestView_Delete(t *testing.T) {
 	})
 }
 
-func TestView_MergeView(t *testing.T) {
+func TestViewMergeView(t *testing.T) {
 	registerID1 := "fruit"
 
 	registerID2 := "vegetable"
@@ -225,7 +236,8 @@ func TestView_MergeView(t *testing.T) {
 		err = chView.Set(registerID2, "", "", flow.RegisterValue("carrot"))
 		assert.NoError(t, err)
 
-		v.MergeView(chView)
+		err = v.MergeView(chView)
+		assert.NoError(t, err)
 
 		b1, err := v.Get(registerID1, "", "")
 		assert.NoError(t, err)
@@ -247,7 +259,8 @@ func TestView_MergeView(t *testing.T) {
 		assert.NoError(t, err)
 
 		chView := v.NewChild()
-		v.MergeView(chView)
+		err = v.MergeView(chView)
+		assert.NoError(t, err)
 
 		b1, err := v.Get(registerID1, "", "")
 		assert.NoError(t, err)
@@ -269,7 +282,9 @@ func TestView_MergeView(t *testing.T) {
 		chView := v.NewChild()
 		err = chView.Set(registerID2, "", "", flow.RegisterValue("carrot"))
 		assert.NoError(t, err)
-		v.MergeView(chView)
+
+		err = v.MergeView(chView)
+		assert.NoError(t, err)
 
 		b1, err := v.Get(registerID1, "", "")
 		assert.NoError(t, err)
@@ -291,7 +306,8 @@ func TestView_MergeView(t *testing.T) {
 		chView := v.NewChild()
 		err = chView.Set(registerID1, "", "", flow.RegisterValue("orange"))
 		assert.NoError(t, err)
-		v.MergeView(chView)
+		err = v.MergeView(chView)
+		assert.NoError(t, err)
 
 		b, err := v.Get(registerID1, "", "")
 		assert.NoError(t, err)
@@ -311,7 +327,8 @@ func TestView_MergeView(t *testing.T) {
 		chView := v.NewChild()
 		err = chView.Set(registerID1, "", "", flow.RegisterValue("orange"))
 		assert.NoError(t, err)
-		v.MergeView(chView)
+		err = v.MergeView(chView)
+		assert.NoError(t, err)
 
 		b, err := v.Get(registerID1, "", "")
 		assert.NoError(t, err)
@@ -329,7 +346,8 @@ func TestView_MergeView(t *testing.T) {
 		chView := v.NewChild()
 		err = chView.Delete(registerID1, "", "")
 		assert.NoError(t, err)
-		v.MergeView(chView)
+		err = v.MergeView(chView)
+		assert.NoError(t, err)
 
 		b, err := v.Get(registerID1, "", "")
 		assert.NoError(t, err)
@@ -340,27 +358,34 @@ func TestView_MergeView(t *testing.T) {
 			return nil, nil
 		})
 
+		register := flow.NewRegisterID("", "", "")
+		register.Owner = registerID1
+		registerID1Bytes := register.Bytes()
+		register.Owner = registerID2
+		registerID2Bytes := register.Bytes()
+
 		expSpock1 := hash.NewSHA3_256()
 		err := v.Set(registerID1, "", "", flow.RegisterValue("apple"))
 		assert.NoError(t, err)
-		err = hashIt(expSpock1, []byte("apple"))
+		hashIt(t, expSpock1, registerID1Bytes)
+		hashIt(t, expSpock1, []byte("apple"))
 		assert.NoError(t, err)
-		assert.Equal(t, v.SpockSecret(), []uint8(expSpock1.SumHash()))
 
 		expSpock2 := hash.NewSHA3_256()
 		chView := v.NewChild()
 		err = chView.Set(registerID2, "", "", flow.RegisterValue("carrot"))
-		assert.NoError(t, err)
-		err = hashIt(expSpock2, []byte("carrot"))
-		assert.NoError(t, err)
-		assert.Equal(t, chView.SpockSecret(), []uint8(expSpock2.SumHash()))
+		require.NoError(t, err)
+		hashIt(t, expSpock2, registerID2Bytes)
+		hashIt(t, expSpock2, []byte("carrot"))
 
-		v.MergeView(chView)
-		err = hashIt(expSpock1, expSpock2.SumHash())
+		hash2 := expSpock2.SumHash()
+		assert.Equal(t, chView.(*delta.View).SpockSecret(), []uint8(hash2))
+
+		err = v.MergeView(chView)
 		assert.NoError(t, err)
 
-		s := v.SpockSecret()
-		assert.Equal(t, s, []uint8(expSpock1.SumHash()))
+		hashIt(t, expSpock1, hash2)
+		assert.Equal(t, v.SpockSecret(), []uint8(expSpock1.SumHash()))
 	})
 
 	t.Run("RegisterTouchesDataMerge", func(t *testing.T) {
@@ -377,15 +402,21 @@ func TestView_MergeView(t *testing.T) {
 		err = chView.Set(registerID3, "", "", flow.RegisterValue("milk"))
 		assert.NoError(t, err)
 
-		v.MergeView(chView)
+		err = v.MergeView(chView)
+		assert.NoError(t, err)
 
 		reads := v.Interactions().Reads
 
 		require.Len(t, reads, 3)
-		assert.ElementsMatch(t, []flow.RegisterID{
-			flow.NewRegisterID(registerID1, "", ""),
-			flow.NewRegisterID(registerID2, "", ""),
-			flow.NewRegisterID(registerID3, "", ""),
+
+		r1 := flow.NewRegisterID(registerID1, "", "")
+		r2 := flow.NewRegisterID(registerID2, "", "")
+		r3 := flow.NewRegisterID(registerID3, "", "")
+
+		assert.Equal(t, map[string]flow.RegisterID{
+			r1.String(): r1,
+			r2.String(): r2,
+			r3.String(): r3,
 		}, reads)
 	})
 
@@ -499,7 +530,8 @@ func TestView_AllRegisters(t *testing.T) {
 		err = vv.Touch("f", "", "")
 		assert.NoError(t, err)
 
-		v.MergeView(vv)
+		err = v.MergeView(vv)
+		assert.NoError(t, err)
 		allRegs := v.Interactions().AllRegisters()
 		assert.Len(t, allRegs, 6)
 	})
@@ -534,14 +566,18 @@ func TestView_Reads(t *testing.T) {
 
 		touches := v.Interactions().Reads
 		require.Len(t, touches, 2)
-		assert.ElementsMatch(t, []flow.RegisterID{
-			flow.NewRegisterID(registerID1, "", ""),
-			flow.NewRegisterID(registerID2, "", ""),
+
+		r1 := flow.NewRegisterID(registerID1, "", "")
+		r2 := flow.NewRegisterID(registerID2, "", "")
+
+		assert.Equal(t, map[string]flow.RegisterID{
+			r1.String(): r1,
+			r2.String(): r2,
 		}, touches)
 	})
 }
 
-func hashIt(spock hash.Hasher, value []byte) error {
+func hashIt(t *testing.T, spock hash.Hasher, value []byte) {
 	_, err := spock.Write(value)
-	return err
+	assert.NoError(t, err, "spock write is not supposed to error")
 }

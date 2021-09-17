@@ -1,22 +1,22 @@
 package extract
 
 import (
+	"crypto/rand"
 	"path"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 
 	"github.com/onflow/flow-go/cmd/util/cmd/common"
 	"github.com/onflow/flow-go/ledger"
-	"github.com/onflow/flow-go/ledger/common/utils"
+	"github.com/onflow/flow-go/ledger/common/pathfinder"
 	"github.com/onflow/flow-go/ledger/complete"
 	"github.com/onflow/flow-go/ledger/complete/wal"
+	"github.com/onflow/flow-go/model/bootstrap"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module/metrics"
 	"github.com/onflow/flow-go/storage/badger"
-
 	"github.com/onflow/flow-go/utils/unittest"
 )
 
@@ -59,7 +59,15 @@ func TestExtractExecutionState(t *testing.T) {
 
 	t.Run("empty WAL doesn't find anything", func(t *testing.T) {
 		withDirs(t, func(datadir, execdir, outdir string) {
-			err := extractExecutionState(execdir, unittest.StateCommitmentFixture(), outdir, zerolog.Nop())
+			err := extractExecutionState(
+				execdir,
+				unittest.StateCommitmentFixture(),
+				outdir,
+				zerolog.Nop(),
+				false,
+				false,
+				false,
+			)
 			require.Error(t, err)
 		})
 	})
@@ -73,37 +81,32 @@ func TestExtractExecutionState(t *testing.T) {
 
 			// generate some oldLedger data
 			size := 10
-			keyMaxByteSize := 64
-			valueMaxByteSize := 1024
 
-			f, err := complete.NewLedger(execdir, size*10, metr, zerolog.Nop(), nil, complete.DefaultPathFinderVersion)
-			//f, err := oldLedger.NewMTrieStorage(execdir, size*10, metr, nil)
+			diskWal, err := wal.NewDiskWAL(zerolog.Nop(), nil, metrics.NewNoopCollector(), execdir, size, pathfinder.PathByteSize, wal.SegmentSize)
+			require.NoError(t, err)
+			f, err := complete.NewLedger(diskWal, size*10, metr, zerolog.Nop(), complete.DefaultPathFinderVersion)
 			require.NoError(t, err)
 
 			var stateCommitment = f.InitialState()
 
 			//saved data after updates
 			keysValuesByCommit := make(map[string]map[string]keyPair)
-			commitsByBlocks := make(map[flow.Identifier][]byte)
+			commitsByBlocks := make(map[flow.Identifier]ledger.State)
 			blocksInOrder := make([]flow.Identifier, size)
 
 			for i := 0; i < size; i++ {
-				//keys := utils.GetRandomRegisterIDs(4)
-				//values := utils.GetRandomValues(len(keys), 10, valueMaxByteSize)
-
-				keys := utils.RandomUniqueKeys(4, 3, 10, keyMaxByteSize)
-				values := utils.RandomValues(len(keys), 10, valueMaxByteSize)
+				keys, values := getSampleKeyValues(i)
 
 				update, err := ledger.NewUpdate(stateCommitment, keys, values)
 				require.NoError(t, err)
 
-				stateCommitment, err = f.Set(update)
+				stateCommitment, _, err = f.Set(update)
 				//stateCommitment, err = f.UpdateRegisters(keys, values, stateCommitment)
 				require.NoError(t, err)
 
 				// generate random block and map it to state commitment
 				blockID := unittest.IdentifierFixture()
-				err = commits.Store(blockID, stateCommitment)
+				err = commits.Store(blockID, flow.StateCommitment(stateCommitment))
 				require.NoError(t, err)
 
 				data := make(map[string]keyPair, len(keys))
@@ -114,11 +117,12 @@ func TestExtractExecutionState(t *testing.T) {
 					}
 				}
 
-				keysValuesByCommit[string(stateCommitment)] = data
+				keysValuesByCommit[string(stateCommitment[:])] = data
 				commitsByBlocks[blockID] = stateCommitment
 				blocksInOrder[i] = blockID
 			}
 
+			<-diskWal.Done()
 			<-f.Done()
 			err = db.Close()
 			require.NoError(t, err)
@@ -132,17 +136,20 @@ func TestExtractExecutionState(t *testing.T) {
 				//we need fresh output dir to prevent contamination
 				unittest.RunWithTempDir(t, func(outdir string) {
 
-					Cmd.SetArgs([]string{"--execution-state-dir", execdir, "--output-dir", outdir, "--block-hash", blockID.String(), "--datadir", datadir})
+					Cmd.SetArgs([]string{"--execution-state-dir", execdir, "--output-dir", outdir, "--block-hash", blockID.String(), "--datadir", datadir, "--no-migration", "--no-report"})
+
 					err := Cmd.Execute()
 					require.NoError(t, err)
 
-					require.FileExists(t, path.Join(outdir, wal.RootCheckpointFilename)) //make sure we have root checkpoint file
+					require.FileExists(t, path.Join(outdir, bootstrap.FilenameWALRootCheckpoint)) //make sure we have root checkpoint file
 
-					storage, err := complete.NewLedger(outdir, 1000, metr, zerolog.Nop(), nil, complete.DefaultPathFinderVersion)
-					//storage, err := oldLedger.NewMTrieStorage(outdir, 1000, metr, nil)
+					diskWal, err := wal.NewDiskWAL(zerolog.Nop(), nil, metrics.NewNoopCollector(), outdir, size, pathfinder.PathByteSize, wal.SegmentSize)
 					require.NoError(t, err)
 
-					data := keysValuesByCommit[string(stateCommitment)]
+					storage, err := complete.NewLedger(diskWal, 1000, metr, zerolog.Nop(), complete.DefaultPathFinderVersion)
+					require.NoError(t, err)
+
+					data := keysValuesByCommit[string(stateCommitment[:])]
 
 					keys := make([]ledger.Key, 0, len(data))
 					for _, v := range data {
@@ -158,7 +165,6 @@ func TestExtractExecutionState(t *testing.T) {
 
 					for i, key := range keys {
 						registerValue := registerValues[i]
-
 						require.Equal(t, data[key.String()].value, registerValue)
 					}
 
@@ -172,10 +178,92 @@ func TestExtractExecutionState(t *testing.T) {
 						require.Error(t, err)
 					}
 
+					<-diskWal.Done()
+					<-storage.Done()
 				})
 			}
 		})
 	})
+}
+
+func getSampleKeyValues(i int) ([]ledger.Key, []ledger.Value) {
+	switch i {
+	case 0:
+		return []ledger.Key{getKey("", "", "uuid"), getKey("", "", "account_address_state")},
+			[]ledger.Value{[]byte{'1'}, []byte{'A'}}
+	case 1:
+		return []ledger.Key{getKey("ADDRESS", "ADDRESS", "public_key_count"),
+				getKey("ADDRESS", "ADDRESS", "public_key_0"),
+				getKey("ADDRESS", "", "exists"),
+				getKey("ADDRESS", "", "storage_used")},
+			[]ledger.Value{[]byte{1}, []byte("PUBLICKEYXYZ"), []byte{1}, []byte{100}}
+	case 2:
+		// TODO change the contract_names to CBOR encoding
+		return []ledger.Key{getKey("ADDRESS", "ADDRESS", "contract_names"), getKey("ADDRESS", "ADDRESS", "code.mycontract")},
+			[]ledger.Value{[]byte("mycontract"), []byte("CONTRACT Content")}
+	default:
+		keys := make([]ledger.Key, 0)
+		values := make([]ledger.Value, 0)
+		for j := 0; j < 10; j++ {
+			address := make([]byte, 32)
+			_, err := rand.Read(address)
+			if err != nil {
+				panic(err)
+			}
+			keys = append(keys, getKey(string(address), "", "test"))
+			values = append(values, getRandomCadenceValue())
+		}
+		return keys, values
+	}
+}
+
+func getKey(owner, controller, key string) ledger.Key {
+	return ledger.Key{KeyParts: []ledger.KeyPart{
+		{Type: uint16(0), Value: []byte(owner)},
+		{Type: uint16(1), Value: []byte(controller)},
+		{Type: uint16(2), Value: []byte(key)},
+	},
+	}
+}
+
+func getRandomCadenceValue() ledger.Value {
+
+	randomPart := make([]byte, 10)
+	_, err := rand.Read(randomPart)
+	if err != nil {
+		panic(err)
+	}
+	valueBytes := []byte{
+		// magic prefix
+		0x0, 0xca, 0xde, 0x0, 0x4,
+		// tag
+		0xd8, 132,
+		// array, 5 items follow
+		0x85,
+
+		// tag
+		0xd8, 193,
+		// UTF-8 string, length 4
+		0x64,
+		// t, e, s, t
+		0x74, 0x65, 0x73, 0x74,
+
+		// nil
+		0xf6,
+
+		// positive integer 1
+		0x1,
+
+		// array, 0 items follow
+		0x80,
+
+		// UTF-8 string, length 10
+		0x6a,
+		0x54, 0x65, 0x73, 0x74, 0x53, 0x74, 0x72, 0x75, 0x63, 0x74,
+	}
+
+	valueBytes = append(valueBytes, randomPart...)
+	return ledger.Value(valueBytes)
 }
 
 func withDirs(t *testing.T, f func(datadir, execdir, outdir string)) {

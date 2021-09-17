@@ -1,10 +1,14 @@
 package fvm
 
 import (
+	"fmt"
+
 	"github.com/onflow/cadence"
 	"github.com/onflow/cadence/runtime"
 	"github.com/onflow/cadence/runtime/common"
 
+	"github.com/onflow/flow-go/fvm/errors"
+	"github.com/onflow/flow-go/fvm/programs"
 	"github.com/onflow/flow-go/fvm/state"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/model/hash"
@@ -26,13 +30,12 @@ type ScriptProcedure struct {
 	Value     cadence.Value
 	Logs      []string
 	Events    []flow.Event
-	// TODO: report gas consumption: https://github.com/dapperlabs/flow-go/issues/4139
-	GasUsed uint64
-	Err     Error
+	GasUsed   uint64
+	Err       errors.Error
 }
 
 type ScriptProcessor interface {
-	Process(*VirtualMachine, Context, *ScriptProcedure, *state.State, *Programs) error
+	Process(*VirtualMachine, Context, *ScriptProcedure, *state.StateHolder, *programs.Programs) error
 }
 
 func (proc *ScriptProcedure) WithArguments(args ...[]byte) *ScriptProcedure {
@@ -43,16 +46,18 @@ func (proc *ScriptProcedure) WithArguments(args ...[]byte) *ScriptProcedure {
 	}
 }
 
-func (proc *ScriptProcedure) Run(vm *VirtualMachine, ctx Context, st *state.State, programs *Programs) error {
+func (proc *ScriptProcedure) Run(vm *VirtualMachine, ctx Context, sth *state.StateHolder, programs *programs.Programs) error {
 	for _, p := range ctx.ScriptProcessors {
-		err := p.Process(vm, ctx, proc, st, programs)
-		vmErr, fatalErr := handleError(err)
-		if fatalErr != nil {
-			return fatalErr
+		err := p.Process(vm, ctx, proc, sth, programs)
+		txError, failure := errors.SplitErrorTypes(err)
+		if failure != nil {
+			if errors.IsALedgerFailure(failure) {
+				return fmt.Errorf("cannot execute the script, this error usually happens if the reference block for this script is not set to a recent block: %w", failure)
+			}
+			return failure
 		}
-
-		if vmErr != nil {
-			proc.Err = vmErr
+		if txError != nil {
+			proc.Err = txError
 			return nil
 		}
 	}
@@ -70,16 +75,11 @@ func (i ScriptInvocator) Process(
 	vm *VirtualMachine,
 	ctx Context,
 	proc *ScriptProcedure,
-	st *state.State,
-	programs *Programs,
+	sth *state.StateHolder,
+	programs *programs.Programs,
 ) error {
-	env, err := newEnvironment(ctx, vm, st, programs)
-	if err != nil {
-		return err
-	}
-
+	env := NewScriptEnvironment(ctx, vm, sth, programs)
 	location := common.ScriptLocation(proc.ID[:])
-
 	value, err := vm.Runtime.ExecuteScript(
 		runtime.Script{
 			Source:    proc.Script,
@@ -90,13 +90,14 @@ func (i ScriptInvocator) Process(
 			Location:  location,
 		},
 	)
+
 	if err != nil {
-		return err
+		return errors.HandleRuntimeError(err)
 	}
 
 	proc.Value = value
-	proc.Logs = env.getLogs()
+	proc.Logs = env.Logs()
 	proc.Events = env.Events()
-
+	proc.GasUsed = env.GetComputationUsed()
 	return nil
 }

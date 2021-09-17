@@ -39,7 +39,6 @@ func (suite *Suite) TestHistoricalTransactionResult() {
 
 	backend := New(
 		suite.state,
-		suite.execClient,
 		nil,
 		[]accessproto.AccessAPIClient{suite.historicalAccessClient},
 		suite.blocks,
@@ -47,10 +46,14 @@ func (suite *Suite) TestHistoricalTransactionResult() {
 		suite.collections,
 		suite.transactions,
 		suite.receipts,
+		suite.results,
 		suite.chainID,
 		metrics.NewNoopCollector(),
 		nil,
 		false,
+		DefaultMaxHeightRange,
+		nil,
+		nil,
 		suite.log,
 	)
 
@@ -93,7 +96,6 @@ func (suite *Suite) TestHistoricalTransaction() {
 
 	backend := New(
 		suite.state,
-		suite.execClient,
 		nil,
 		[]accessproto.AccessAPIClient{suite.historicalAccessClient},
 		suite.blocks,
@@ -101,10 +103,14 @@ func (suite *Suite) TestHistoricalTransaction() {
 		suite.collections,
 		suite.transactions,
 		suite.receipts,
+		suite.results,
 		suite.chainID,
 		metrics.NewNoopCollector(),
 		nil,
 		false,
+		DefaultMaxHeightRange,
+		nil,
+		nil,
 		suite.log,
 	)
 

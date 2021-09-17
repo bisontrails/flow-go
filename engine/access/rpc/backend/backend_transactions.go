@@ -26,7 +26,6 @@ const collectionNodesToTry uint = 3
 
 type backendTransactions struct {
 	staticCollectionRPC  accessproto.AccessAPIClient // rpc client tied to a fixed collection node
-	executionRPC         execproto.ExecutionAPIClient
 	transactions         storage.Transactions
 	executionReceipts    storage.ExecutionReceipts
 	collections          storage.Collections
@@ -220,25 +219,38 @@ func (b *backendTransactions) GetTransactionResult(
 		return nil, txErr
 	}
 
-	// get events for the transaction
-	executed, events, statusCode, txError, err := b.lookupTransactionResult(ctx, txID)
-	if err != nil {
+	// find the block for the transaction
+	block, err := b.lookupBlock(txID)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return nil, convertStorageError(err)
+	}
+
+	var blockID flow.Identifier
+	var transactionWasExecuted bool
+	var events []flow.Event
+	var txError string
+	var statusCode uint32
+	// access node may not have the block if it hasn't yet been finalized, hence block can be nil at this point
+	if block != nil {
+		blockID = block.ID()
+		transactionWasExecuted, events, statusCode, txError, err = b.lookupTransactionResult(ctx, txID, blockID)
+		if err != nil {
+			return nil, convertStorageError(err)
+		}
 	}
 
 	// derive status of the transaction
-	status, err := b.deriveTransactionStatus(tx, executed)
+	status, err := b.deriveTransactionStatus(tx, transactionWasExecuted, block)
 	if err != nil {
 		return nil, convertStorageError(err)
 	}
-
-	// TODO: Set correct values for StatusCode and ErrorMessage
 
 	return &access.TransactionResult{
 		Status:       status,
 		StatusCode:   uint(statusCode),
 		Events:       events,
 		ErrorMessage: txError,
+		BlockID:      blockID,
 	}, nil
 }
 
@@ -246,10 +258,10 @@ func (b *backendTransactions) GetTransactionResult(
 func (b *backendTransactions) deriveTransactionStatus(
 	tx *flow.TransactionBody,
 	executed bool,
+	block *flow.Block,
 ) (flow.TransactionStatus, error) {
 
-	block, err := b.lookupBlock(tx.ID())
-	if errors.Is(err, storage.ErrNotFound) {
+	if block == nil {
 		// Not in a block, let's see if it's expired
 		referenceBlock, err := b.state.AtBlockID(tx.ReferenceBlockID).Head()
 		if err != nil {
@@ -291,9 +303,6 @@ func (b *backendTransactions) deriveTransactionStatus(
 		// However, this will not happen as of now since the ingestion engine doesn't subscribe
 		// for collections
 		return flow.TransactionStatusPending, nil
-	}
-	if err != nil {
-		return flow.TransactionStatusUnknown, err
 	}
 
 	if !executed {
@@ -345,22 +354,12 @@ func (b *backendTransactions) lookupBlock(txID flow.Identifier) (*flow.Block, er
 func (b *backendTransactions) lookupTransactionResult(
 	ctx context.Context,
 	txID flow.Identifier,
+	blockID flow.Identifier,
 ) (bool, []flow.Event, uint32, string, error) {
-
-	// find the block ID for the transaction
-	block, err := b.lookupBlock(txID)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			// access node may not have the block if it hasn't yet been finalized
-			return false, nil, 0, "", nil
-		}
-		return false, nil, 0, "", convertStorageError(err)
-	}
-
-	blockID := block.ID()
 
 	events, txStatus, message, err := b.getTransactionResultFromExecutionNode(ctx, blockID, txID[:])
 	if err != nil {
+		// if either the execution node reported no results or the execution node could not be chosen
 		if status.Code(err) == codes.NotFound {
 			// No result yet, indicate that it has not been executed
 			return false, nil, 0, "", nil
@@ -405,6 +404,10 @@ func (b *backendTransactions) getHistoricalTransactionResult(
 				// This is on a historical node. No transactions from it will ever be
 				// executed, therefore we should consider this expired
 				result.Status = entities.TransactionStatus_EXPIRED
+			} else if result.GetStatus() == entities.TransactionStatus_UNKNOWN {
+				// We've moved to returning Status UNKNOWN instead of an error with the NotFound status,
+				// Therefore we should continue and look at the next access node for answers.
+				continue
 			}
 			return access.MessageToTransactionResult(result), nil
 		}
@@ -438,34 +441,21 @@ func (b *backendTransactions) getTransactionResultFromExecutionNode(
 		TransactionId: transactionID,
 	}
 
-	execNodes, err := executionNodesForBlockID(blockID, b.executionReceipts, b.state)
+	execNodes, err := executionNodesForBlockID(ctx, blockID, b.executionReceipts, b.state, b.log)
 	if err != nil {
+		// if no execution receipt were found, return a NotFound GRPC error
+		if errors.As(err, &InsufficientExecutionReceipts{}) {
+			return nil, 0, "", status.Errorf(codes.NotFound, err.Error())
+		}
 		return nil, 0, "", status.Errorf(codes.Internal, "failed to retrieve result from any execution node: %v", err)
 	}
 
-	var resp *execproto.GetTransactionResultResponse
-	if len(execNodes) == 0 {
-		if b.executionRPC == nil {
-			return nil, 0, "", status.Errorf(codes.Internal, "failed to retrieve result from execution node")
+	resp, err := b.getTransactionResultFromAnyExeNode(ctx, execNodes, req)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, 0, "", err
 		}
-
-		// call the execution node gRPC
-		resp, err = b.executionRPC.GetTransactionResult(ctx, &req)
-		if err != nil {
-			if status.Code(err) == codes.NotFound {
-				return nil, 0, "", err
-			}
-			return nil, 0, "", status.Errorf(codes.Internal, "failed to retrieve result from execution node: %v", err)
-		}
-
-	} else {
-		resp, err = b.getTransactionResultFromAnyExeNode(ctx, execNodes, req)
-		if err != nil {
-			if status.Code(err) == codes.NotFound {
-				return nil, 0, "", err
-			}
-			return nil, 0, "", status.Errorf(codes.Internal, "failed to retrieve result from execution node: %v", err)
-		}
+		return nil, 0, "", status.Errorf(codes.Internal, "failed to retrieve result from execution node: %v", err)
 	}
 
 	events := convert.MessagesToEvents(resp.GetEvents())
@@ -487,7 +477,7 @@ func (b *backendTransactions) getTransactionResultFromAnyExeNode(ctx context.Con
 				Str("execution_node", execNode.String()).
 				Hex("block_id", req.GetBlockId()).
 				Hex("transaction_id", req.GetTransactionId()).
-				Msg("Successfully got account info")
+				Msg("Successfully got transaction results from any node")
 			return resp, nil
 		}
 		if status.Code(err) == codes.NotFound {

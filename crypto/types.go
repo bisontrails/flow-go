@@ -1,7 +1,12 @@
 package crypto
 
+import (
+	"fmt"
+)
+
 //revive:disable:var-naming
 
+// the `go generate` command requires bash scripting, `cmake` and `git`.
 //go:generate bash ./build_dependency.sh
 
 // SigningAlgorithm is an identifier for a signing algorithm
@@ -34,13 +39,19 @@ const (
 	// BLS12-381
 	// p size in bytes, where G1 is defined over the field Zp
 	fieldSize = 48
-	// Points compression when serialized: 1 for compressed, 0 for uncompressed
-	compression = 1
+	//
+	// 1 for compressed, 0 for uncompressed - values should not be changed
+	uncompressed = 0
+	compressed   = 1
+	// Points compression when serialized
+	serializationG1 = compressed
+	serializationG2 = compressed
+	//
 	// SignatureLenBLSBLS12381 is the size of G1 elements
-	SignatureLenBLSBLS12381 = fieldSize * (2 - compression) // the length is divided by 2 if compression is on
+	SignatureLenBLSBLS12381 = fieldSize * (2 - serializationG1) // the length is divided by 2 if compression is on
 	PrKeyLenBLSBLS12381     = 32
 	// PubKeyLenBLSBLS12381 is the size of G2 elements
-	PubKeyLenBLSBLS12381        = 2 * fieldSize * (2 - compression) // the length is divided by 2 if compression is on
+	PubKeyLenBLSBLS12381        = 2 * fieldSize * (2 - serializationG2) // the length is divided by 2 if compression is on
 	KeyGenSeedMinLenBLSBLS12381 = PrKeyLenBLSBLS12381 + (securityBits / 8)
 	KeyGenSeedMaxLenBLSBLS12381 = maxScalarSize
 	// opSwUInputLenBLSBLS12381 is the input length of the optimized SwU map to G1
@@ -94,3 +105,25 @@ const (
 
 // Signature is a generic type, regardless of the signature scheme
 type Signature []byte
+
+// InvalidInputsError is an error returned when a crypto API receives invalid inputs.
+// It allows a function caller differentiate unexpected program errors from errors caused by
+// invalid inputs.
+type InvalidInputsError struct {
+	message string
+}
+
+// newInvalidInputsError constructs a new InvalidInputsError
+func newInvalidInputsError(msg string, args ...interface{}) error {
+	return &InvalidInputsError{message: fmt.Sprintf(msg, args...)}
+}
+
+func (e InvalidInputsError) Error() string {
+	return e.message
+}
+
+// IsInvalidInputsError checks if the input error is of a InvalidInputsError type
+func IsInvalidInputsError(err error) bool {
+	_, ok := err.(*InvalidInputsError)
+	return ok
+}

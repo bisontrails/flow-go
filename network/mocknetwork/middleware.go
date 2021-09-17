@@ -19,24 +19,31 @@ type Middleware struct {
 }
 
 // Ping provides a mock function with given fields: targetID
-func (_m *Middleware) Ping(targetID flow.Identifier) (time.Duration, error) {
+func (_m *Middleware) Ping(targetID flow.Identifier) (message.PingResponse, time.Duration, error) {
 	ret := _m.Called(targetID)
 
-	var r0 time.Duration
-	if rf, ok := ret.Get(0).(func(flow.Identifier) time.Duration); ok {
+	var r0 message.PingResponse
+	if rf, ok := ret.Get(0).(func(flow.Identifier) message.PingResponse); ok {
 		r0 = rf(targetID)
 	} else {
-		r0 = ret.Get(0).(time.Duration)
+		r0 = ret.Get(0).(message.PingResponse)
 	}
 
-	var r1 error
-	if rf, ok := ret.Get(1).(func(flow.Identifier) error); ok {
+	var r1 time.Duration
+	if rf, ok := ret.Get(1).(func(flow.Identifier) time.Duration); ok {
 		r1 = rf(targetID)
 	} else {
-		r1 = ret.Error(1)
+		r1 = ret.Get(1).(time.Duration)
 	}
 
-	return r0, r1
+	var r2 error
+	if rf, ok := ret.Get(2).(func(flow.Identifier) error); ok {
+		r2 = rf(targetID)
+	} else {
+		r2 = ret.Error(2)
+	}
+
+	return r0, r1, r2
 }
 
 // Publish provides a mock function with given fields: msg, channel
@@ -46,27 +53,6 @@ func (_m *Middleware) Publish(msg *message.Message, channel network.Channel) err
 	var r0 error
 	if rf, ok := ret.Get(0).(func(*message.Message, network.Channel) error); ok {
 		r0 = rf(msg, channel)
-	} else {
-		r0 = ret.Error(0)
-	}
-
-	return r0
-}
-
-// Send provides a mock function with given fields: channel, msg, targetIDs
-func (_m *Middleware) Send(channel network.Channel, msg *message.Message, targetIDs ...flow.Identifier) error {
-	_va := make([]interface{}, len(targetIDs))
-	for _i := range targetIDs {
-		_va[_i] = targetIDs[_i]
-	}
-	var _ca []interface{}
-	_ca = append(_ca, channel, msg)
-	_ca = append(_ca, _va...)
-	ret := _m.Called(_ca...)
-
-	var r0 error
-	if rf, ok := ret.Get(0).(func(network.Channel, *message.Message, ...flow.Identifier) error); ok {
-		r0 = rf(channel, msg, targetIDs...)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -136,15 +122,11 @@ func (_m *Middleware) Unsubscribe(channel network.Channel) error {
 }
 
 // UpdateAllowList provides a mock function with given fields:
-func (_m *Middleware) UpdateAllowList() error {
-	ret := _m.Called()
+func (_m *Middleware) UpdateAllowList() {
+	_m.Called()
+}
 
-	var r0 error
-	if rf, ok := ret.Get(0).(func() error); ok {
-		r0 = rf()
-	} else {
-		r0 = ret.Error(0)
-	}
-
-	return r0
+// UpdateNodeAddresses provides a mock function with given fields:
+func (_m *Middleware) UpdateNodeAddresses() {
+	_m.Called()
 }

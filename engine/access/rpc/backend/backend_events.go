@@ -19,12 +19,12 @@ import (
 )
 
 type backendEvents struct {
-	staticExecutionRPC execproto.ExecutionAPIClient
-	blocks             storage.Blocks
-	executionReceipts  storage.ExecutionReceipts
-	state              protocol.State
-	connFactory        ConnectionFactory
-	log                zerolog.Logger
+	headers           storage.Headers
+	executionReceipts storage.ExecutionReceipts
+	state             protocol.State
+	connFactory       ConnectionFactory
+	log               zerolog.Logger
+	maxHeightRange    uint
 }
 
 // GetEventsForHeightRange retrieves events for all sealed blocks between the start block height and
@@ -39,16 +39,21 @@ func (b *backendEvents) GetEventsForHeightRange(
 		return nil, status.Error(codes.InvalidArgument, "invalid start or end height")
 	}
 
+	rangeSize := endHeight - startHeight + 1 // range is inclusive on both ends
+	if rangeSize > uint64(b.maxHeightRange) {
+		return nil, status.Errorf(codes.InvalidArgument, "requested block range (%d) exceeded maximum (%d)", rangeSize, b.maxHeightRange)
+	}
+
 	// get the latest sealed block header
 	head, err := b.state.Sealed().Head()
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, " failed to get events: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to get events: %v", err)
 	}
 
 	// start height should not be beyond the last sealed height
 	if head.Height < startHeight {
-		return nil, status.Errorf(codes.Internal,
-			" start height %d is greater than the last sealed block height %d", startHeight, head.Height)
+		return nil, status.Errorf(codes.OutOfRange,
+			"start height %d is greater than the last sealed block height %d", startHeight, head.Height)
 	}
 
 	// limit max height to last sealed block in the chain
@@ -60,12 +65,12 @@ func (b *backendEvents) GetEventsForHeightRange(
 	blockHeaders := make([]*flow.Header, 0)
 
 	for i := startHeight; i <= endHeight; i++ {
-		block, err := b.blocks.ByHeight(i)
+		header, err := b.headers.ByHeight(i)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to get events: %v", err)
 		}
 
-		blockHeaders = append(blockHeaders, block.Header)
+		blockHeaders = append(blockHeaders, header)
 	}
 
 	return b.getBlockEventsFromExecutionNode(ctx, blockHeaders, eventType)
@@ -78,15 +83,19 @@ func (b *backendEvents) GetEventsForBlockIDs(
 	blockIDs []flow.Identifier,
 ) ([]flow.BlockEvents, error) {
 
+	if uint(len(blockIDs)) > b.maxHeightRange {
+		return nil, fmt.Errorf("requested block range (%d) exceeded maximum (%d)", len(blockIDs), b.maxHeightRange)
+	}
+
 	// find the block headers for all the block IDs
 	blockHeaders := make([]*flow.Header, 0)
 	for _, blockID := range blockIDs {
-		block, err := b.blocks.ByID(blockID)
+		header, err := b.headers.ByBlockID(blockID)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to get events: %v", err)
 		}
 
-		blockHeaders = append(blockHeaders, block.Header)
+		blockHeaders = append(blockHeaders, header)
 	}
 
 	// forward the request to the execution node
@@ -117,33 +126,21 @@ func (b *backendEvents) getBlockEventsFromExecutionNode(
 	// choose the last block ID to find the list of execution nodes
 	lastBlockID := blockIDs[len(blockIDs)-1]
 
-	execNodes, err := executionNodesForBlockID(lastBlockID, b.executionReceipts, b.state)
+	execNodes, err := executionNodesForBlockID(ctx, lastBlockID, b.executionReceipts, b.state, b.log)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to retrieve events from execution node: %v", err)
 	}
 
 	var resp *execproto.GetEventsForBlockIDsResponse
-	if len(execNodes) == 0 {
-		if b.staticExecutionRPC == nil {
-			return nil, status.Errorf(codes.Internal, "failed to retrieve events from execution node")
-		}
-
-		// call the execution node gRPC
-		resp, err = b.staticExecutionRPC.GetEventsForBlockIDs(ctx, &req)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to retrieve events from execution node: %v", err)
-		}
-	} else {
-		var successfulNode *flow.Identity
-		resp, successfulNode, err = b.getEventsFromAnyExeNode(ctx, execNodes, req)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to retrieve events from execution nodes %s: %v", execNodes, err)
-		}
-		b.log.Trace().
-			Str("execution_id", successfulNode.String()).
-			Str("last_block_id", lastBlockID.String()).
-			Msg("successfully got events")
+	var successfulNode *flow.Identity
+	resp, successfulNode, err = b.getEventsFromAnyExeNode(ctx, execNodes, req)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to retrieve events from execution nodes %s: %v", execNodes, err)
 	}
+	b.log.Trace().
+		Str("execution_id", successfulNode.String()).
+		Str("last_block_id", lastBlockID.String()).
+		Msg("successfully got events")
 
 	// convert execution node api result to access node api result
 	results, err := verifyAndConvertToAccessEvents(resp.GetResults(), blockHeaders)

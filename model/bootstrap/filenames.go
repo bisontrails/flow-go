@@ -2,8 +2,6 @@ package bootstrap
 
 import (
 	"path/filepath"
-
-	"github.com/onflow/flow-go/ledger/complete/wal"
 )
 
 // Canonical filenames/paths for bootstrapping files.
@@ -22,16 +20,18 @@ var (
 	PathNodeInfosPub          = filepath.Join(DirnamePublicBootstrap, "node-infos.pub.json")
 	PathPartnerNodeInfoPrefix = filepath.Join(DirnamePublicBootstrap, "node-info.pub.")
 	PathNodeInfoPub           = filepath.Join(DirnamePublicBootstrap, "node-info.pub.%v.json") // %v will be replaced by NodeID
-	PathRootBlock             = filepath.Join(DirnamePublicBootstrap, "root-block.json")
-	PathRootQC                = filepath.Join(DirnamePublicBootstrap, "root-qc.json")
-	PathRootResult            = filepath.Join(DirnamePublicBootstrap, "root-execution-result.json")
-	PathRootSeal              = filepath.Join(DirnamePublicBootstrap, "root-block-seal.json")
-	PathRootCheckpoint        = filepath.Join(DirnameExecutionState, wal.RootCheckpointFilename) // only available on an execution node
+
+	PathRootProtocolStateSnapshot = filepath.Join(DirnamePublicBootstrap, "root-protocol-state-snapshot.json")
+
+	FilenameWALRootCheckpoint = "root.checkpoint"
+	PathRootCheckpoint        = filepath.Join(DirnameExecutionState, FilenameWALRootCheckpoint) // only available on an execution node
 
 	// private genesis information
-	DirPrivateRoot           = "private-root-information"
-	FilenameRandomBeaconPriv = "random-beacon.priv.json"
-	PathPrivNodeInfoPrefix   = "node-info.priv."
-	PathNodeInfoPriv         = filepath.Join(DirPrivateRoot, "private-node-info_%v", "node-info.priv.json")    // %v will be replaced by NodeID
-	PathRandomBeaconPriv     = filepath.Join(DirPrivateRoot, "private-node-info_%v", FilenameRandomBeaconPriv) // %v will be replaced by NodeID
+	DirPrivateRoot                   = "private-root-information"
+	FilenameRandomBeaconPriv         = "random-beacon.priv.json"
+	PathPrivNodeInfoPrefix           = "node-info.priv."
+	PathNodeInfoPriv                 = filepath.Join(DirPrivateRoot, "private-node-info_%v", "node-info.priv.json")                 // %v will be replaced by NodeID
+	PathNodeMachineAccountPrivateKey = filepath.Join(DirPrivateRoot, "private-node-info_%v", "node-machine-account-key.priv.json")  // %v will be replaced by NodeID
+	PathNodeMachineAccountInfoPriv   = filepath.Join(DirPrivateRoot, "private-node-info_%v", "node-machine-account-info.priv.json") // %v will be replaced by NodeID
+	PathRandomBeaconPriv             = filepath.Join(DirPrivateRoot, "private-node-info_%v", FilenameRandomBeaconPriv)              // %v will be replaced by NodeID
 )

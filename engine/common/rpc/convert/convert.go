@@ -1,15 +1,18 @@
 package convert
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
-	"github.com/golang/protobuf/ptypes"
 	"github.com/onflow/flow/protobuf/go/flow/entities"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/onflow/flow-go/crypto"
 	"github.com/onflow/flow-go/crypto/hash"
 	"github.com/onflow/flow-go/model/flow"
+	"github.com/onflow/flow-go/state/protocol"
+	"github.com/onflow/flow-go/state/protocol/inmem"
 )
 
 var ErrEmptyMessage = errors.New("protobuf message is empty")
@@ -119,10 +122,7 @@ func TransactionToMessage(tb flow.TransactionBody) *entities.Transaction {
 func BlockHeaderToMessage(h *flow.Header) (*entities.BlockHeader, error) {
 	id := h.ID()
 
-	t, err := ptypes.TimestampProto(h.Timestamp)
-	if err != nil {
-		return nil, err
-	}
+	t := timestamppb.New(h.Timestamp)
 
 	return &entities.BlockHeader{
 		Id:        id[:],
@@ -137,11 +137,7 @@ func BlockToMessage(h *flow.Block) (*entities.Block, error) {
 	id := h.ID()
 
 	parentID := h.Header.ParentID
-	t, err := ptypes.TimestampProto(h.Header.Timestamp)
-	if err != nil {
-		return nil, err
-	}
-
+	t := timestamppb.New(h.Header.Timestamp)
 	cg := make([]*entities.CollectionGuarantee, len(h.Payload.Guarantees))
 	for i, g := range h.Payload.Guarantees {
 		cg[i] = collectionGuaranteeToMessage(g)
@@ -159,7 +155,7 @@ func BlockToMessage(h *flow.Block) (*entities.Block, error) {
 		Timestamp:            t,
 		CollectionGuarantees: cg,
 		BlockSeals:           seals,
-		Signatures:           [][]byte{h.Header.ParentVoterSig},
+		Signatures:           [][]byte{h.Header.ParentVoterSigData},
 	}
 
 	return &bh, nil
@@ -344,6 +340,18 @@ func MessageToIdentifier(b []byte) flow.Identifier {
 	return flow.HashToID(b)
 }
 
+func StateCommitmentToMessage(s flow.StateCommitment) []byte {
+	return s[:]
+}
+
+func MessageToStateCommitment(bytes []byte) (sc flow.StateCommitment, err error) {
+	if len(bytes) != len(sc) {
+		return sc, fmt.Errorf("invalid state commitment length. got %d expected %d", len(bytes), len(sc))
+	}
+	copy(sc[:], bytes)
+	return
+}
+
 func IdentifiersToMessages(l []flow.Identifier) [][]byte {
 	results := make([][]byte, len(l))
 	for i, item := range l {
@@ -358,4 +366,30 @@ func MessagesToIdentifiers(l [][]byte) []flow.Identifier {
 		results[i] = MessageToIdentifier(item)
 	}
 	return results
+}
+
+// SnapshotToBytes converts a `protocol.Snapshot` to bytes, encoded as JSON
+func SnapshotToBytes(snapshot protocol.Snapshot) ([]byte, error) {
+	serializable, err := inmem.FromSnapshot(snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := json.Marshal(serializable.Encodable())
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+// BytesToInmemSnapshot converts an array of bytes to `inmem.Snapshot`
+func BytesToInmemSnapshot(bytes []byte) (*inmem.Snapshot, error) {
+	var encodable inmem.EncodableSnapshot
+	err := json.Unmarshal(bytes, &encodable)
+	if err != nil {
+		return nil, fmt.Errorf("could not unmarshal snapshot data retreived from access node: %w", err)
+	}
+
+	return inmem.SnapshotFromEncodable(encodable), nil
 }

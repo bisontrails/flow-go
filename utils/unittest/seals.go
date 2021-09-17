@@ -30,8 +30,8 @@ func (f *sealFactory) Fixtures(n int) []*flow.Seal {
 
 func (f *sealFactory) WithResult(result *flow.ExecutionResult) func(*flow.Seal) {
 	return func(seal *flow.Seal) {
-		finalState, ok := result.FinalStateCommitment()
-		if !ok {
+		finalState, err := result.FinalStateCommitment()
+		if err != nil {
 			panic("missing first execution result's final state commitment")
 		}
 		seal.ResultID = result.ID()
@@ -50,12 +50,6 @@ func (f *sealFactory) WithBlockID(blockID flow.Identifier) func(*flow.Seal) {
 func (f *sealFactory) WithBlock(block *flow.Header) func(*flow.Seal) {
 	return func(seal *flow.Seal) {
 		seal.BlockID = block.ID()
-	}
-}
-
-func (f *sealFactory) WithServiceEvents(events ...flow.ServiceEvent) func(*flow.Seal) {
-	return func(seal *flow.Seal) {
-		seal.ServiceEvents = events
 	}
 }
 

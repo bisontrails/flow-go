@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/onflow/flow-go/cmd"
+	"github.com/onflow/flow-go/cmd/bootstrap/gcs"
 )
 
 var (
@@ -31,7 +34,7 @@ func init() {
 
 func addPullCmdFlags() {
 	pullCmd.Flags().StringVar(&flagNetwork, "network", "", "network name to pull partner node information")
-	_ = pullCmd.MarkFlagRequired("network")
+	cmd.MarkFlagRequired(pullCmd, "network")
 
 	pullCmd.Flags().StringVar(&flagBucketName, "bucket", "flow-genesis-bootstrap", "google bucket name")
 }
@@ -44,16 +47,16 @@ func pull(cmd *cobra.Command, args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*45)
 	defer cancel()
 
-	bucket := newGoogleBucket(flagBucketName)
+	bucket := gcs.NewGoogleBucket(flagBucketName)
 
-	client, err := bucket.newClient(ctx)
+	client, err := bucket.NewClient(ctx)
 	if err != nil {
 		log.Error().Msgf("error trying get new google bucket client: %v", err)
 	}
 	defer client.Close()
 
 	prefix := fmt.Sprintf("%s-", flagNetwork)
-	files, err := bucket.getFiles(ctx, client, prefix, "")
+	files, err := bucket.GetFiles(ctx, client, prefix, "")
 	if err != nil {
 		log.Error().Msgf("error trying list google bucket files: %v", err)
 	}
@@ -64,7 +67,7 @@ func pull(cmd *cobra.Command, args []string) {
 			fullOutpath := filepath.Join(flagOutdir, file)
 			log.Printf("downloading %s", file)
 
-			err = bucket.downloadFile(ctx, client, fullOutpath, file)
+			err = bucket.DownloadFile(ctx, client, fullOutpath, file)
 			if err != nil {
 				log.Error().Msgf("error trying download google bucket file: %v", err)
 			}

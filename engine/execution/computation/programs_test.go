@@ -6,32 +6,36 @@ import (
 
 	"github.com/onflow/cadence"
 	jsoncdc "github.com/onflow/cadence/encoding/json"
-	"github.com/onflow/cadence/runtime"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/onflow/flow-go/engine/execution"
+	"github.com/onflow/flow-go/engine/execution/computation/committer"
 	"github.com/onflow/flow-go/engine/execution/computation/computer"
 	"github.com/onflow/flow-go/engine/execution/state/delta"
 	"github.com/onflow/flow-go/engine/execution/testutil"
 	"github.com/onflow/flow-go/fvm"
+	"github.com/onflow/flow-go/fvm/programs"
+	"github.com/onflow/flow-go/fvm/state"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module/mempool/entity"
+	"github.com/onflow/flow-go/module/metrics"
 	module "github.com/onflow/flow-go/module/mock"
+	"github.com/onflow/flow-go/module/trace"
 	"github.com/onflow/flow-go/utils/unittest"
 )
 
 func TestPrograms_TestContractUpdates(t *testing.T) {
-	rt := runtime.NewInterpreterRuntime()
+	rt := fvm.NewInterpreterRuntime()
 	chain := flow.Mainnet.Chain()
-	vm := fvm.New(rt)
+	vm := fvm.NewVirtualMachine(rt)
 	execCtx := fvm.NewContext(zerolog.Nop(), fvm.WithChain(chain))
 
 	privateKeys, err := testutil.GenerateAccountPrivateKeys(1)
 	require.NoError(t, err)
 	ledger := testutil.RootBootstrappedLedger(vm, execCtx)
-	accounts, err := testutil.CreateAccounts(vm, ledger, fvm.NewEmptyPrograms(), privateKeys, chain)
+	accounts, err := testutil.CreateAccounts(vm, ledger, programs.NewEmptyPrograms(), privateKeys, chain)
 	require.NoError(t, err)
 
 	// setup transactions
@@ -61,7 +65,7 @@ func TestPrograms_TestContractUpdates(t *testing.T) {
 
 	// tx6 calls the method of the contract (version 2 expected)
 	tx6 := testutil.CreateEmitEventTransaction(account, account)
-	prepareTx(t, tx6, account, privKey, 4, chain)
+	prepareTx(t, tx6, account, privKey, 5, chain)
 
 	transactions := []*flow.TransactionBody{tx1, tx2, tx3, tx4, tx5, tx6}
 
@@ -89,12 +93,13 @@ func TestPrograms_TestContractUpdates(t *testing.T) {
 				Transactions: transactions,
 			},
 		},
+		StartState: unittest.StateCommitmentPointerFixture(),
 	}
 
 	me := new(module.Local)
 	me.On("NodeID").Return(flow.ZeroID)
 
-	blockComputer, err := computer.NewBlockComputer(vm, execCtx, nil, nil, zerolog.Nop())
+	blockComputer, err := computer.NewBlockComputer(vm, execCtx, metrics.NewNoopCollector(), trace.NewNoopTracer(), zerolog.Nop(), committer.NewNoopViewCommitter())
 	require.NoError(t, err)
 
 	programsCache, err := NewProgramsCache(10)
@@ -112,20 +117,22 @@ func TestPrograms_TestContractUpdates(t *testing.T) {
 	returnedComputationResult, err := engine.ComputeBlock(context.Background(), executableBlock, blockView)
 	require.NoError(t, err)
 
+	require.Len(t, returnedComputationResult.Events, 2) // 1 collection + 1 system chunk
+
 	// first event should be contract deployed
-	assert.EqualValues(t, "flow.AccountContractAdded", returnedComputationResult.Events[0].Type)
+	assert.EqualValues(t, "flow.AccountContractAdded", returnedComputationResult.Events[0][0].Type)
 
 	// second event should have a value of 1 (since is calling version 1 of contract)
-	hasValidEventValue(t, returnedComputationResult.Events[1], 1)
+	hasValidEventValue(t, returnedComputationResult.Events[0][1], 1)
 
 	// third event should be contract updated
-	assert.EqualValues(t, "flow.AccountContractUpdated", returnedComputationResult.Events[2].Type)
+	assert.EqualValues(t, "flow.AccountContractUpdated", returnedComputationResult.Events[0][2].Type)
 
 	// 4th event should have a value of 2 (since is calling version 2 of contract)
-	hasValidEventValue(t, returnedComputationResult.Events[3], 2)
+	hasValidEventValue(t, returnedComputationResult.Events[0][3], 2)
 
 	// 5th event should have a value of 2 (since is calling version 2 of contract)
-	hasValidEventValue(t, returnedComputationResult.Events[4], 2)
+	hasValidEventValue(t, returnedComputationResult.Events[0][4], 2)
 }
 
 // TestPrograms_TestBlockForks tests the functionality of
@@ -144,15 +151,15 @@ func TestPrograms_TestContractUpdates(t *testing.T) {
 //             -> Block1211 (emit event - version should be 2)
 func TestPrograms_TestBlockForks(t *testing.T) {
 	// setup
-	rt := runtime.NewInterpreterRuntime()
+	rt := fvm.NewInterpreterRuntime()
 	chain := flow.Mainnet.Chain()
-	vm := fvm.New(rt)
+	vm := fvm.NewVirtualMachine(rt)
 	execCtx := fvm.NewContext(zerolog.Nop(), fvm.WithChain(chain))
 
 	privateKeys, err := testutil.GenerateAccountPrivateKeys(1)
 	require.NoError(t, err)
 	ledger := testutil.RootBootstrappedLedger(vm, execCtx)
-	accounts, err := testutil.CreateAccounts(vm, ledger, fvm.NewEmptyPrograms(), privateKeys, chain)
+	accounts, err := testutil.CreateAccounts(vm, ledger, programs.NewEmptyPrograms(), privateKeys, chain)
 	require.NoError(t, err)
 
 	account := accounts[0]
@@ -161,7 +168,7 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 	me := new(module.Local)
 	me.On("NodeID").Return(flow.ZeroID)
 
-	blockComputer, err := computer.NewBlockComputer(vm, execCtx, nil, nil, zerolog.Nop())
+	blockComputer, err := computer.NewBlockComputer(vm, execCtx, metrics.NewNoopCollector(), trace.NewNoopTracer(), zerolog.Nop(), committer.NewNoopViewCommitter())
 	require.NoError(t, err)
 
 	programsCache, err := NewProgramsCache(10)
@@ -182,7 +189,7 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		block1111, block12, block121, block1211 *flow.Block
 
 		block1View, block11View, block111View, block112View, block1121View,
-		block1111View, block12View, block121View, block1211View *delta.View
+		block1111View, block12View, block121View, block1211View state.View
 	)
 
 	t.Run("executing block1 (no collection)", func(t *testing.T) {
@@ -196,7 +203,8 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		}
 		block1View = view.NewChild()
 		executableBlock := &entity.ExecutableBlock{
-			Block: block1,
+			Block:      block1,
+			StartState: unittest.StateCommitmentPointerFixture(),
 		}
 		_, err := engine.ComputeBlock(context.Background(), executableBlock, block1View)
 		require.NoError(t, err)
@@ -215,7 +223,7 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		// cache should have changes
 		require.True(t, programsCache.Get(block11.ID()).HasChanges())
 		// 1st event should be contract deployed
-		assert.EqualValues(t, "flow.AccountContractAdded", res.Events[0].Type)
+		assert.EqualValues(t, "flow.AccountContractAdded", res.Events[0][0].Type)
 	})
 
 	t.Run("executing block111 (emit event (expected v1), update contract to v3)", func(t *testing.T) {
@@ -235,10 +243,13 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		require.NotNil(t, programsCache.Get(block111.ID()))
 		// cache should have changes
 		require.True(t, programsCache.Get(block111.ID()).HasChanges())
+
+		require.Len(t, res.Events, 2)
+
 		// 1st event
-		hasValidEventValue(t, res.Events[0], block111ExpectedValue)
+		hasValidEventValue(t, res.Events[0][0], block111ExpectedValue)
 		// second event should be contract deployed
-		assert.EqualValues(t, "flow.AccountContractUpdated", res.Events[1].Type)
+		assert.EqualValues(t, "flow.AccountContractUpdated", res.Events[0][1].Type)
 	})
 
 	t.Run("executing block1111 (emit event (expected v3))", func(t *testing.T) {
@@ -251,8 +262,11 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		block1111, res = createTestBlockAndRun(t, engine, block111, col1111, block1111View)
 		// cache should include a program for this block
 		require.NotNil(t, programsCache.Get(block1111.ID()))
+
+		require.Len(t, res.Events, 2)
+
 		// 1st event
-		hasValidEventValue(t, res.Events[0], block1111ExpectedValue)
+		hasValidEventValue(t, res.Events[0][0], block1111ExpectedValue)
 	})
 
 	t.Run("executing block112 (emit event (expected v1))", func(t *testing.T) {
@@ -269,10 +283,13 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		block112, res = createTestBlockAndRun(t, engine, block11, col112, block112View)
 		// cache should include a program for this block
 		require.NotNil(t, programsCache.Get(block112.ID()))
+
+		require.Len(t, res.Events, 2)
+
 		// 1st event
-		hasValidEventValue(t, res.Events[0], block112ExpectedValue)
+		hasValidEventValue(t, res.Events[0][0], block112ExpectedValue)
 		// second event should be contract deployed
-		assert.EqualValues(t, "flow.AccountContractUpdated", res.Events[1].Type)
+		assert.EqualValues(t, "flow.AccountContractUpdated", res.Events[0][1].Type)
 
 	})
 	t.Run("executing block1121 (emit event (expected v4))", func(t *testing.T) {
@@ -285,8 +302,11 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		block1121, res = createTestBlockAndRun(t, engine, block112, col1121, block1121View)
 		// cache should include a program for this block
 		require.NotNil(t, programsCache.Get(block1121.ID()))
+
+		require.Len(t, res.Events, 2)
+
 		// 1st event
-		hasValidEventValue(t, res.Events[0], block1121ExpectedValue)
+		hasValidEventValue(t, res.Events[0][0], block1121ExpectedValue)
 
 	})
 	t.Run("executing block12 (deploys contract V2)", func(t *testing.T) {
@@ -299,7 +319,10 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		block12, res = createTestBlockAndRun(t, engine, block1, col12, block12View)
 		// cache should include a program for this block
 		require.NotNil(t, programsCache.Get(block12.ID()))
-		assert.EqualValues(t, "flow.AccountContractAdded", res.Events[0].Type)
+
+		require.Len(t, res.Events, 2)
+
+		assert.EqualValues(t, "flow.AccountContractAdded", res.Events[0][0].Type)
 	})
 	t.Run("executing block121 (emit event (expected V2)", func(t *testing.T) {
 		block121ExpectedValue := 2
@@ -311,8 +334,11 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		block121, res = createTestBlockAndRun(t, engine, block12, col121, block121View)
 		// cache should include a program for this block
 		require.NotNil(t, programsCache.Get(block121.ID()))
+
+		require.Len(t, res.Events, 2)
+
 		// 1st event
-		hasValidEventValue(t, res.Events[0], block121ExpectedValue)
+		hasValidEventValue(t, res.Events[0][0], block121ExpectedValue)
 	})
 	t.Run("executing Block1211 (emit event (expected V2)", func(t *testing.T) {
 		block1211ExpectedValue := 2
@@ -326,13 +352,16 @@ func TestPrograms_TestBlockForks(t *testing.T) {
 		require.NotNil(t, programsCache.Get(block1211.ID()))
 		// had no change so cache should be equal to parent
 		require.Equal(t, programsCache.Get(block121.ID()), programsCache.Get(block1211.ID()))
+
+		require.Len(t, res.Events, 2)
+
 		// 1st event
-		hasValidEventValue(t, res.Events[0], block1211ExpectedValue)
+		hasValidEventValue(t, res.Events[0][0], block1211ExpectedValue)
 	})
 
 }
 
-func createTestBlockAndRun(t *testing.T, engine *Manager, parentBlock *flow.Block, col flow.Collection, view *delta.View) (*flow.Block, *execution.ComputationResult) {
+func createTestBlockAndRun(t *testing.T, engine *Manager, parentBlock *flow.Block, col flow.Collection, view state.View) (*flow.Block, *execution.ComputationResult) {
 	guarantee := flow.CollectionGuarantee{
 		CollectionID: col.ID(),
 		Signature:    nil,
@@ -356,6 +385,7 @@ func createTestBlockAndRun(t *testing.T, engine *Manager, parentBlock *flow.Bloc
 				Transactions: col.Transactions,
 			},
 		},
+		StartState: unittest.StateCommitmentPointerFixture(),
 	}
 	returnedComputationResult, err := engine.ComputeBlock(context.Background(), executableBlock, view)
 	require.NoError(t, err)

@@ -18,16 +18,39 @@ func (_m *JobConsumer) Check() {
 }
 
 // NotifyJobIsDone provides a mock function with given fields: _a0
-func (_m *JobConsumer) NotifyJobIsDone(_a0 module.JobID) {
-	_m.Called(_a0)
+func (_m *JobConsumer) NotifyJobIsDone(_a0 module.JobID) uint64 {
+	ret := _m.Called(_a0)
+
+	var r0 uint64
+	if rf, ok := ret.Get(0).(func(module.JobID) uint64); ok {
+		r0 = rf(_a0)
+	} else {
+		r0 = ret.Get(0).(uint64)
+	}
+
+	return r0
+}
+
+// Size provides a mock function with given fields:
+func (_m *JobConsumer) Size() uint {
+	ret := _m.Called()
+
+	var r0 uint
+	if rf, ok := ret.Get(0).(func() uint); ok {
+		r0 = rf()
+	} else {
+		r0 = ret.Get(0).(uint)
+	}
+
+	return r0
 }
 
 // Start provides a mock function with given fields: defaultIndex
-func (_m *JobConsumer) Start(defaultIndex int64) error {
+func (_m *JobConsumer) Start(defaultIndex uint64) error {
 	ret := _m.Called(defaultIndex)
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(int64) error); ok {
+	if rf, ok := ret.Get(0).(func(uint64) error); ok {
 		r0 = rf(defaultIndex)
 	} else {
 		r0 = ret.Error(0)

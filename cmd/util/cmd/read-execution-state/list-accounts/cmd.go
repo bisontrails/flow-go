@@ -15,6 +15,7 @@ import (
 	"github.com/onflow/flow-go/fvm/state"
 	"github.com/onflow/flow-go/ledger"
 	"github.com/onflow/flow-go/ledger/common/pathfinder"
+	"github.com/onflow/flow-go/ledger/complete"
 	"github.com/onflow/flow-go/ledger/complete/mtrie"
 	"github.com/onflow/flow-go/model/flow"
 )
@@ -58,13 +59,14 @@ func run(*cobra.Command, []string) {
 
 	forest := stateLoader()
 
-	stateCommitment, err := hex.DecodeString(flagStateCommitment)
+	stateCommitmentBytes, err := hex.DecodeString(flagStateCommitment)
 	if err != nil {
 		log.Fatal().Err(err).Msg("invalid flag, cannot decode")
 	}
 
-	if len(stateCommitment) != 32 {
-		log.Fatal().Err(err).Msgf("invalid number of bytes, got %d expected %d", len(stateCommitment), 32)
+	stateCommitment, err := flow.ToStateCommitment(stateCommitmentBytes)
+	if err != nil {
+		log.Fatal().Err(err).Msgf("invalid number of bytes, got %d expected %d", len(stateCommitmentBytes), len(stateCommitment))
 	}
 
 	chain, err := getChain(flagChain)
@@ -75,14 +77,13 @@ func run(*cobra.Command, []string) {
 	ldg := delta.NewView(func(owner, controller, key string) (flow.RegisterValue, error) {
 
 		ledgerKey := executionState.RegisterIDToKey(flow.NewRegisterID(owner, controller, key))
-		// TODO (RAMTIN) change the path finder version
-		path, err := pathfinder.KeyToPath(ledgerKey, 0)
+		path, err := pathfinder.KeyToPath(ledgerKey, complete.DefaultPathFinderVersion)
 		if err != nil {
 			log.Fatal().Err(err).Msgf("cannot convert key to path")
 		}
 
 		read := &ledger.TrieRead{
-			RootHash: stateCommitment,
+			RootHash: ledger.RootHash(stateCommitment),
 			Paths: []ledger.Path{
 				path,
 			},
@@ -96,18 +97,9 @@ func run(*cobra.Command, []string) {
 		return payload[0].Value, nil
 	})
 
-	st := state.NewState(ldg)
-	accounts := state.NewAccounts(st)
-	finalGenerator, err := state.NewStateBoundAddressGenerator(st, chain)
-	if err != nil {
-		log.Fatal().Err(err).Msgf("cannot get current address state")
-	}
-
-	err = st.Commit()
-	if err != nil {
-		log.Fatal().Err(err).Msgf("cannot commit state to ledger")
-	}
-
+	sth := state.NewStateHolder(state.NewState(ldg))
+	accounts := state.NewAccounts(sth)
+	finalGenerator := state.NewStateBoundAddressGenerator(sth, chain)
 	finalState := finalGenerator.Bytes()
 
 	generator := chain.NewAddressGenerator()

@@ -72,6 +72,8 @@ func testGenSignVerify(t *testing.T, salg SigningAlgorithm, halg hash.Hasher) {
 	}
 }
 
+var expectedError = newInvalidInputsError("")
+
 func testKeyGenSeed(t *testing.T, salg SigningAlgorithm, minLen int, maxLen int) {
 	// valid seed lengths
 	seed := make([]byte, minLen)
@@ -84,9 +86,11 @@ func testKeyGenSeed(t *testing.T, salg SigningAlgorithm, minLen int, maxLen int)
 	seed = make([]byte, minLen-1)
 	_, err = GeneratePrivateKey(salg, seed)
 	assert.Error(t, err)
+	assert.IsType(t, expectedError, err)
 	seed = make([]byte, maxLen+1)
 	_, err = GeneratePrivateKey(salg, seed)
 	assert.Error(t, err)
+	assert.IsType(t, expectedError, err)
 }
 
 func testEncodeDecode(t *testing.T, salg SigningAlgorithm) {
@@ -130,6 +134,16 @@ func testEncodeDecode(t *testing.T, salg SigningAlgorithm) {
 		assert.Equal(t, pkBytes, pkCheckBytes, "keys should be equal")
 		distinctPkBytes := distinctSk.PublicKey().Encode()
 		assert.NotEqual(t, pkBytes, distinctPkBytes, "keys should be different")
+
+		// same for the compressed encoding
+		pkComprBytes := pk.EncodeCompressed()
+		pkComprCheck, err := DecodePublicKeyCompressed(salg, pkComprBytes)
+		require.Nil(t, err, "the key decoding has failed")
+		assert.True(t, pk.Equals(pkComprCheck), "key equality check failed")
+		pkCheckComprBytes := pkComprCheck.EncodeCompressed()
+		assert.Equal(t, pkComprBytes, pkCheckComprBytes, "keys should be equal")
+		distinctPkComprBytes := distinctSk.PublicKey().EncodeCompressed()
+		assert.NotEqual(t, pkComprBytes, distinctPkComprBytes, "keys should be different")
 	}
 
 	// test invalid private keys (equal to the curve group order)
@@ -147,6 +161,7 @@ func testEncodeDecode(t *testing.T, salg SigningAlgorithm) {
 		0x5B, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x01}
 	_, err := DecodePrivateKey(salg, groupOrder[salg])
 	require.Error(t, err, "the key decoding should fail - private key value is too large")
+	assert.IsType(t, newInvalidInputsError(""), err)
 }
 
 func testEquals(t *testing.T, salg SigningAlgorithm, otherSigAlgo SigningAlgorithm) {

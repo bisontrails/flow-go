@@ -40,19 +40,12 @@ func New(trustedRoot *forks.BlockQC, finalizationCallback module.Finalizer, noti
 	fnlzr := Finalizer{
 		notifier:             notifier,
 		finalizationCallback: finalizationCallback,
-		forest:               *forest.NewLevelledForest(),
+		forest:               *forest.NewLevelledForest(trustedRoot.Block.View),
 		lastLocked:           trustedRoot,
 		lastFinalized:        trustedRoot,
 	}
-
-	// We can already pre-prune the levelled forest to the view below it.
-	// Thereby, the levelled forest won't event store older (unnecessary) blocks
-	err := fnlzr.forest.PruneUpToLevel(trustedRoot.Block.View)
-	if err != nil {
-		return nil, fmt.Errorf("internal levelled forest error: %w", err)
-	}
 	// verify and add root block to levelled forest
-	err = fnlzr.VerifyBlock(trustedRoot.Block)
+	err := fnlzr.VerifyBlock(trustedRoot.Block)
 	if err != nil {
 		return nil, fmt.Errorf("invalid root block: %w", err)
 	}
@@ -296,7 +289,7 @@ func (r *Finalizer) updateLockedQc(ancestryChain *ancestryChain) {
 }
 
 // updateFinalizedBlockQc updates `lastFinalizedBlockQC`
-// We use the locking rule from 'Event-driven HotStuff Protocol' where the condition is:
+// We use the finalization rule from 'Event-driven HotStuff Protocol' where the condition is:
 //    * Consider the set S of all blocks that have a DIRECT 2-chain on top of it PLUS any 1-chain
 //    * The 'Last finalized Block' is the block in S with the _highest view number_ (newest);
 // Calling this method with previously-processed blocks leaves consensus state invariant.

@@ -55,12 +55,13 @@ func New(
 		access.NewProtocolStateBlocks(state),
 		chain,
 		access.TransactionValidationOptions{
-			Expiry:            flow.DefaultTransactionExpiry,
-			ExpiryBuffer:      config.ExpiryBuffer,
-			MaxGasLimit:       flow.DefaultMaxGasLimit,
-			MaxAddressIndex:   config.MaxAddressIndex,
-			CheckScriptsParse: config.CheckScriptsParse,
-			MaxTxSizeLimit:    flow.DefaultMaxTxSizeLimit,
+			Expiry:                 flow.DefaultTransactionExpiry,
+			ExpiryBuffer:           config.ExpiryBuffer,
+			MaxGasLimit:            config.MaxGasLimit,
+			MaxAddressIndex:        config.MaxAddressIndex,
+			CheckScriptsParse:      config.CheckScriptsParse,
+			MaxTransactionByteSize: config.MaxTransactionByteSize,
+			MaxCollectionByteSize:  config.MaxCollectionByteSize,
 		},
 	)
 
@@ -99,13 +100,18 @@ func (e *Engine) Done() <-chan struct{} {
 
 // SubmitLocal submits an event originating on the local node.
 func (e *Engine) SubmitLocal(event interface{}) {
-	e.Submit(e.me.NodeID(), event)
+	e.unit.Launch(func() {
+		err := e.process(e.me.NodeID(), event)
+		if err != nil {
+			engine.LogError(e.log, err)
+		}
+	})
 }
 
 // Submit submits the given event from the node with the given origin ID
 // for processing in a non-blocking manner. It returns instantly and logs
 // a potential processing error internally when done.
-func (e *Engine) Submit(originID flow.Identifier, event interface{}) {
+func (e *Engine) Submit(channel network.Channel, originID flow.Identifier, event interface{}) {
 	e.unit.Launch(func() {
 		err := e.process(originID, event)
 		if err != nil {
@@ -116,12 +122,14 @@ func (e *Engine) Submit(originID flow.Identifier, event interface{}) {
 
 // ProcessLocal processes an event originating on the local node.
 func (e *Engine) ProcessLocal(event interface{}) error {
-	return e.Process(e.me.NodeID(), event)
+	return e.unit.Do(func() error {
+		return e.process(e.me.NodeID(), event)
+	})
 }
 
 // Process processes the given event from the node with the given origin ID in
 // a blocking manner. It returns the potential processing error when done.
-func (e *Engine) Process(originID flow.Identifier, event interface{}) error {
+func (e *Engine) Process(channel network.Channel, originID flow.Identifier, event interface{}) error {
 	return e.unit.Do(func() error {
 		return e.process(originID, event)
 	})
@@ -229,7 +237,7 @@ func (e *Engine) onTransaction(originID flow.Identifier, tx *flow.TransactionBod
 
 		err := e.conduit.Multicast(tx, e.config.PropagationRedundancy+1, txCluster.NodeIDs()...)
 		if err != nil && !errors.Is(err, network.EmptyTargetList) {
-			// if mutlicast to a target cluster with at least one node failed, return an error
+			// if multicast to a target cluster with at least one node failed, return an error
 			return fmt.Errorf("could not route transaction to cluster: %w", err)
 		}
 		if err == nil {

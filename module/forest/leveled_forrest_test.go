@@ -1,6 +1,7 @@
 package forest
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,7 +75,7 @@ func TestVertexIteratorOnEmpty(t *testing.T) {
 
 // TestLevelledForest_AddVertex tests that Vertex can be added twice without problems
 func TestLevelledForest_AddVertex(t *testing.T) {
-	F := NewLevelledForest()
+	F := NewLevelledForest(0)
 	v := NewVertexMock("A", 3, "Genesis", 0)
 	if err := F.VerifyVertex(v); err != nil {
 		assert.Fail(t, err.Error())
@@ -258,6 +259,58 @@ func TestLevelledForest_GetVertex(t *testing.T) {
 	assert.False(t, exists)
 }
 
+// TestLevelledForest_GetSize tests that GetSize returns valid size when adding and pruning vertices
+func TestLevelledForest_GetSize(t *testing.T) {
+	F := NewLevelledForest(0)
+	numberOfNodes := uint64(10)
+	parentLevel := uint64(0)
+	for i := uint64(1); i <= numberOfNodes; i++ {
+		vertexId := strconv.FormatUint(i, 10)
+		parentId := strconv.FormatUint(parentLevel, 10)
+		F.AddVertex(NewVertexMock(vertexId, i, parentId, parentLevel))
+		parentLevel = i
+	}
+	assert.Equal(t, numberOfNodes, F.GetSize())
+	assert.NoError(t, F.PruneUpToLevel(numberOfNodes/2))
+	// pruning removes element till some level but not including, that's why if we prune
+	// to numberOfNodes/2 then we actually expect elements with level >= numberOfNodes/2
+	assert.Equal(t, numberOfNodes/2+1, F.GetSize())
+	assert.NoError(t, F.PruneUpToLevel(numberOfNodes+1))
+	assert.Equal(t, uint64(0), F.GetSize())
+}
+
+// TestLevelledForest_GetSize_PruningTwice tests that GetSize returns same size when pruned twice to same height
+func TestLevelledForest_GetSize_PruningTwice(t *testing.T) {
+	F := NewLevelledForest(0)
+	numberOfNodes := uint64(10)
+	parentLevel := uint64(0)
+	for i := uint64(1); i <= numberOfNodes; i++ {
+		vertexId := strconv.FormatUint(i, 10)
+		parentId := strconv.FormatUint(parentLevel, 10)
+		F.AddVertex(NewVertexMock(vertexId, i, parentId, parentLevel))
+		parentLevel = i
+	}
+	assert.NoError(t, F.PruneUpToLevel(numberOfNodes/2))
+	size := F.GetSize()
+
+	assert.NoError(t, F.PruneUpToLevel(numberOfNodes/2))
+	// pruning again with the same level should not change size
+	assert.Equal(t, size, F.GetSize())
+}
+
+// TestLevelledForest_GetSize_DuplicatedNodes tests that GetSize returns valid size when adding duplicated nodes
+func TestLevelledForest_GetSize_DuplicatedNodes(t *testing.T) {
+	F := NewLevelledForest(0)
+	for _, vertex := range TestVertices {
+		F.AddVertex(vertex)
+	}
+	size := F.GetSize()
+	for _, vertex := range TestVertices {
+		F.AddVertex(vertex)
+	}
+	assert.Equal(t, size, F.GetSize())
+}
+
 // TestLevelledForest_GetVertex tests that Vertex blob is returned properly
 func TestLevelledForest_PruneAtLevel(t *testing.T) {
 	F := populateNewForest(t)
@@ -308,7 +361,7 @@ func TestLevelledForest_PruneAtLevel(t *testing.T) {
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~ Helper Functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ //
 
 func populateNewForest(t *testing.T) *LevelledForest {
-	F := NewLevelledForest()
+	F := NewLevelledForest(0)
 	for _, v := range TestVertices {
 		if err := F.VerifyVertex(v); err != nil {
 			assert.Fail(t, err.Error())

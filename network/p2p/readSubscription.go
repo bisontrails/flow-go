@@ -5,11 +5,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/libp2p/go-libp2p-core/peer"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+
 	"github.com/rs/zerolog"
 
 	"github.com/onflow/flow-go/module"
 	"github.com/onflow/flow-go/network/message"
+	_ "github.com/onflow/flow-go/utils/binstat"
 )
 
 // readSubscription reads the messages coming in on the subscription and calls the given callback until
@@ -19,13 +22,13 @@ type readSubscription struct {
 	log      zerolog.Logger
 	sub      *pubsub.Subscription
 	metrics  module.NetworkMetrics
-	callback func(msg *message.Message)
+	callback func(msg *message.Message, peerID peer.ID)
 }
 
 // newReadSubscription reads the messages coming in on the subscription
 func newReadSubscription(ctx context.Context,
 	sub *pubsub.Subscription,
-	callback func(msg *message.Message),
+	callback func(msg *message.Message, peerID peer.ID),
 	log zerolog.Logger,
 	metrics module.NetworkMetrics) *readSubscription {
 
@@ -76,9 +79,17 @@ func (r *readSubscription) receiveLoop(wg *sync.WaitGroup) {
 			return
 		}
 
+		pid, err := messageSigningID(rawMsg)
+		if err != nil {
+			r.log.Err(err).Msg("failed to validate peer ID of incoming message")
+			return
+		}
+
 		var msg message.Message
 		// convert the incoming raw message payload to Message type
+		//bs := binstat.EnterTimeVal(binstat.BinNet+":wire>1protobuf2message", int64(len(rawMsg.Data)))
 		err = msg.Unmarshal(rawMsg.Data)
+		//binstat.Leave(bs)
 		if err != nil {
 			r.log.Err(err).Str("topic_message", msg.String()).Msg("failed to unmarshal message")
 			return
@@ -88,6 +99,6 @@ func (r *readSubscription) receiveLoop(wg *sync.WaitGroup) {
 		r.metrics.NetworkMessageReceived(msg.Size(), msg.ChannelID, msg.Type)
 
 		// call the callback
-		r.callback(&msg)
+		r.callback(&msg, pid)
 	}
 }

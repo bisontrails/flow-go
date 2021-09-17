@@ -9,11 +9,13 @@ import (
 
 	"github.com/onflow/flow-go/fvm/handler"
 	"github.com/onflow/flow-go/fvm/state"
+	"github.com/onflow/flow-go/fvm/utils"
 	"github.com/onflow/flow-go/model/flow"
 )
 
-func TestContract_DraftFunctionality(t *testing.T) {
-	accounts := state.NewAccounts(state.NewState(state.NewMapLedger()))
+func TestContract_ChildMergeFunctionality(t *testing.T) {
+	sth := state.NewStateHolder(state.NewState(utils.NewSimpleView()))
+	accounts := state.NewAccounts(sth)
 	address := flow.HexToAddress("01")
 	rAdd := runtime.Address(address)
 	err := accounts.Create(nil, address)
@@ -64,7 +66,8 @@ func TestContract_DraftFunctionality(t *testing.T) {
 }
 
 func TestContract_AuthorizationFunctionality(t *testing.T) {
-	accounts := state.NewAccounts(state.NewState(state.NewMapLedger()))
+	sth := state.NewStateHolder(state.NewState(utils.NewSimpleView()))
+	accounts := state.NewAccounts(sth)
 	address := flow.HexToAddress("01")
 	rAdd := runtime.Address(address)
 	err := accounts.Create(nil, address)
@@ -75,7 +78,9 @@ func TestContract_AuthorizationFunctionality(t *testing.T) {
 	err = accounts.Create(nil, unAuthAdd)
 	require.NoError(t, err)
 
-	contractHandler := handler.NewContractHandler(accounts, true, []common.Address{rAdd})
+	contractHandler := handler.NewContractHandler(accounts,
+		true,
+		func() []common.Address { return []common.Address{rAdd} })
 
 	// try to set contract by an unAuthRAdd
 	err = contractHandler.SetContract(rAdd, "testContract1", []byte("ABC"), []common.Address{unAuthRAdd})

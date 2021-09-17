@@ -8,7 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/onflow/flow-go/fvm"
 	completeLedger "github.com/onflow/flow-go/ledger/complete"
+	"github.com/onflow/flow-go/ledger/complete/wal/fixtures"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module/metrics"
 	"github.com/onflow/flow-go/utils/unittest"
@@ -20,14 +22,15 @@ func TestBootstrapLedger(t *testing.T) {
 		chain := flow.Mainnet.Chain()
 
 		metricsCollector := &metrics.NoopCollector{}
-		ls, err := completeLedger.NewLedger(dbDir, 100, metricsCollector, zerolog.Nop(), nil, completeLedger.DefaultPathFinderVersion)
+		wal := &fixtures.NoopWAL{}
+		ls, err := completeLedger.NewLedger(wal, 100, metricsCollector, zerolog.Nop(), completeLedger.DefaultPathFinderVersion)
 		require.NoError(t, err)
 
 		stateCommitment, err := NewBootstrapper(zerolog.Nop()).BootstrapLedger(
 			ls,
 			unittest.ServiceAccountPublicKey,
-			unittest.GenesisTokenSupply,
 			chain,
+			fvm.WithInitialTokenSupply(unittest.GenesisTokenSupply),
 		)
 		require.NoError(t, err)
 
@@ -36,28 +39,30 @@ func TestBootstrapLedger(t *testing.T) {
 		if !assert.Equal(t, expectedStateCommitment, stateCommitment) {
 			t.Logf(
 				"Incorrect state commitment: got %s, expected %s",
-				hex.EncodeToString(stateCommitment),
-				hex.EncodeToString(expectedStateCommitment),
+				hex.EncodeToString(stateCommitment[:]),
+				hex.EncodeToString(expectedStateCommitment[:]),
 			)
 		}
 	})
 }
 
 func TestBootstrapLedger_ZeroTokenSupply(t *testing.T) {
-	var expectedStateCommitment, _ = hex.DecodeString("8e16c6bb5a42a4bcbd01d156c7d6f4b4cd2f37bcd2bdf5779338b2d9585eaab5")
+	expectedStateCommitmentBytes, _ := hex.DecodeString("e8db7461cb4abc886a64ad9ea5f2f1ae2bfeddea91a75a16a7f04ba9dea4ab37")
+	expectedStateCommitment, err := flow.ToStateCommitment(expectedStateCommitmentBytes)
+	require.NoError(t, err)
 
 	unittest.RunWithTempDir(t, func(dbDir string) {
 
 		chain := flow.Mainnet.Chain()
 
 		metricsCollector := &metrics.NoopCollector{}
-		ls, err := completeLedger.NewLedger(dbDir, 100, metricsCollector, zerolog.Nop(), nil, completeLedger.DefaultPathFinderVersion)
+		wal := &fixtures.NoopWAL{}
+		ls, err := completeLedger.NewLedger(wal, 100, metricsCollector, zerolog.Nop(), completeLedger.DefaultPathFinderVersion)
 		require.NoError(t, err)
 
 		stateCommitment, err := NewBootstrapper(zerolog.Nop()).BootstrapLedger(
 			ls,
 			unittest.ServiceAccountPublicKey,
-			0,
 			chain,
 		)
 		require.NoError(t, err)
@@ -65,8 +70,8 @@ func TestBootstrapLedger_ZeroTokenSupply(t *testing.T) {
 		if !assert.Equal(t, expectedStateCommitment, stateCommitment) {
 			t.Logf(
 				"Incorrect state commitment: got %s, expected %s",
-				hex.EncodeToString(stateCommitment),
-				hex.EncodeToString(expectedStateCommitment),
+				hex.EncodeToString(stateCommitment[:]),
+				hex.EncodeToString(expectedStateCommitment[:]),
 			)
 		}
 	})

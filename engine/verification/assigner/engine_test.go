@@ -1,13 +1,16 @@
-package assigner
+package assigner_test
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/onflow/flow-go/engine/verification/test"
+	"github.com/onflow/flow-go/engine/verification/assigner"
+	vertestutils "github.com/onflow/flow-go/engine/verification/utils/unittest"
 	"github.com/onflow/flow-go/model/chunks"
 	"github.com/onflow/flow-go/model/flow"
 	module "github.com/onflow/flow-go/module/mock"
@@ -36,10 +39,10 @@ type AssignerEngineTestSuite struct {
 
 // mockChunkAssigner mocks the chunk assigner of this test suite to assign the chunks based on the input assignment.
 // It returns number of chunks assigned to verification node of this test suite.
-func (s *AssignerEngineTestSuite) mockChunkAssigner(result *flow.ExecutionResult, assignment *chunks.Assignment) int {
-	s.assigner.On("Assign", result, result.BlockID).Return(assignment, nil).Once()
+func (s *AssignerEngineTestSuite) mockChunkAssigner(result *flow.IncorporatedResult, assignment *chunks.Assignment) int {
+	s.assigner.On("Assign", result.Result, result.IncorporatedBlockID).Return(assignment, nil).Once()
 	assignedChunks := assignment.ByNodeID(s.myID())
-	s.metrics.On("OnChunksAssigned", len(assignedChunks)).Return().Once()
+	s.metrics.On("OnChunksAssignmentDoneAtAssigner", len(assignedChunks)).Return().Once()
 	return len(assignedChunks)
 }
 
@@ -85,7 +88,7 @@ func SetupTest(options ...func(suite *AssignerEngineTestSuite)) *AssignerEngineT
 // createContainerBlock creates and returns a block that contains an execution receipt, with its corresponding chunks assignment based
 // on the input options.
 func createContainerBlock(options ...func(result *flow.ExecutionResult, assignments *chunks.Assignment)) (*flow.Block, *chunks.Assignment) {
-	result, assignment := test.CreateExecutionResult(unittest.IdentifierFixture(), options...)
+	result, assignment := vertestutils.CreateExecutionResult(unittest.IdentifierFixture(), options...)
 	receipt := &flow.ExecutionReceipt{
 		ExecutorID:      unittest.IdentifierFixture(),
 		ExecutionResult: *result,
@@ -95,16 +98,17 @@ func createContainerBlock(options ...func(result *flow.ExecutionResult, assignme
 	block := &flow.Block{
 		Header: &header,
 		Payload: &flow.Payload{
-			Receipts: []*flow.ExecutionReceipt{receipt},
+			Receipts: []*flow.ExecutionReceiptMeta{receipt.Meta()},
+			Results:  []*flow.ExecutionResult{&receipt.ExecutionResult},
 		},
 	}
 	return block, assignment
 }
 
 // NewAssignerEngine returns an assigner engine for testing.
-func NewAssignerEngine(s *AssignerEngineTestSuite) *Engine {
+func NewAssignerEngine(s *AssignerEngineTestSuite) *assigner.Engine {
 
-	e := New(zerolog.Logger{},
+	e := assigner.New(zerolog.Logger{},
 		s.metrics,
 		s.tracer,
 		s.me,
@@ -113,7 +117,7 @@ func NewAssignerEngine(s *AssignerEngineTestSuite) *Engine {
 		s.chunksQueue,
 		s.newChunkListener)
 
-	e.withBlockConsumerNotifier(s.notifier)
+	e.WithBlockConsumerNotifier(s.notifier)
 
 	// mocks identity of the verification node
 	s.me.On("NodeID").Return(s.verIdentity.NodeID)
@@ -154,11 +158,11 @@ func newBlockHappyPath(t *testing.T) {
 	// creates a container block, with a single receipt, that contains
 	// one assigned chunk to verification node.
 	containerBlock, assignment := createContainerBlock(
-		test.WithChunks(
-			test.WithAssignee(s.myID())))
-	result := &containerBlock.Payload.Receipts[0].ExecutionResult
+		vertestutils.WithChunks(
+			vertestutils.WithAssignee(s.myID())))
+	result := containerBlock.Payload.Results[0]
 	s.mockStateAtBlockID(result.BlockID)
-	chunksNum := s.mockChunkAssigner(result, assignment)
+	chunksNum := s.mockChunkAssigner(flow.NewIncorporatedResult(containerBlock.ID(), result), assignment)
 	require.Equal(t, chunksNum, 1) // one chunk should be assigned
 
 	// mocks processing assigned chunks
@@ -166,20 +170,21 @@ func newBlockHappyPath(t *testing.T) {
 	// invoked for it.
 	// Also, once all receipts of the block processed, engine should notify the block consumer once, that
 	// it is done with processing this chunk.
-	s.chunksQueue.On("StoreChunkLocator", mock.Anything).Return(true, nil).Times(chunksNum)
+	chunksQueueWG := mockChunksQueueForAssignment(t, s.verIdentity.NodeID, s.chunksQueue, result.ID(), assignment, true, nil)
 	s.newChunkListener.On("Check").Return().Times(chunksNum)
 	s.notifier.On("Notify", containerBlock.ID()).Return().Once()
-	s.metrics.On("OnChunkProcessed").Return().Once()
+	s.metrics.On("OnAssignedChunkProcessedAtAssigner").Return().Once()
 
 	// sends containerBlock containing receipt to assigner engine
-	s.metrics.On("OnAssignerProcessFinalizedBlock", containerBlock.Header.Height).Return().Once()
-	s.metrics.On("OnExecutionReceiptReceived").Return().Once()
+	s.metrics.On("OnFinalizedBlockArrivedAtAssigner", containerBlock.Header.Height).Return().Once()
+	s.metrics.On("OnExecutionResultReceivedAtAssignerEngine").Return().Once()
 	e.ProcessFinalizedBlock(containerBlock)
+
+	unittest.RequireReturnsBefore(t, chunksQueueWG.Wait, 10*time.Millisecond, "could not receive chunk locators")
 
 	mock.AssertExpectationsForObjects(t,
 		s.metrics,
 		s.assigner,
-		s.chunksQueue,
 		s.newChunkListener,
 		s.notifier)
 }
@@ -198,19 +203,19 @@ func newBlockUnstaked(t *testing.T) {
 	// creates a container block, with a single receipt, that contains
 	// no assigned chunk to verification node.
 	containerBlock, _ := createContainerBlock(
-		test.WithChunks( // all chunks assigned to some (random) identifiers, but not this verification node
-			test.WithAssignee(unittest.IdentifierFixture()),
-			test.WithAssignee(unittest.IdentifierFixture()),
-			test.WithAssignee(unittest.IdentifierFixture())))
-	result := &containerBlock.Payload.Receipts[0].ExecutionResult
+		vertestutils.WithChunks( // all chunks assigned to some (random) identifiers, but not this verification node
+			vertestutils.WithAssignee(unittest.IdentifierFixture()),
+			vertestutils.WithAssignee(unittest.IdentifierFixture()),
+			vertestutils.WithAssignee(unittest.IdentifierFixture())))
+	result := containerBlock.Payload.Results[0]
 	s.mockStateAtBlockID(result.BlockID)
 
 	// once assigner engine is done processing the block, it should notify the processing notifier.
 	s.notifier.On("Notify", containerBlock.ID()).Return().Once()
 
 	// sends block containing receipt to assigner engine
-	s.metrics.On("OnAssignerProcessFinalizedBlock", containerBlock.Header.Height).Return().Once()
-	s.metrics.On("OnExecutionReceiptReceived").Return().Once()
+	s.metrics.On("OnFinalizedBlockArrivedAtAssigner", containerBlock.Header.Height).Return().Once()
+	s.metrics.On("OnExecutionResultReceivedAtAssignerEngine").Return().Once()
 	e.ProcessFinalizedBlock(containerBlock)
 
 	// when the node is unstaked at reference block id, chunk assigner should not be called,
@@ -235,17 +240,17 @@ func newBlockNoChunk(t *testing.T) {
 
 	// creates a container block, with a single receipt, that contains no chunks.
 	containerBlock, assignment := createContainerBlock()
-	result := &containerBlock.Payload.Receipts[0].ExecutionResult
+	result := containerBlock.Payload.Results[0]
 	s.mockStateAtBlockID(result.BlockID)
-	chunksNum := s.mockChunkAssigner(result, assignment)
+	chunksNum := s.mockChunkAssigner(flow.NewIncorporatedResult(containerBlock.ID(), result), assignment)
 	require.Equal(t, chunksNum, 0) // no chunk should be assigned
 
 	// once assigner engine is done processing the block, it should notify the processing notifier.
 	s.notifier.On("Notify", containerBlock.ID()).Return().Once()
 
 	// sends block containing receipt to assigner engine
-	s.metrics.On("OnAssignerProcessFinalizedBlock", containerBlock.Header.Height).Return().Once()
-	s.metrics.On("OnExecutionReceiptReceived").Return().Once()
+	s.metrics.On("OnFinalizedBlockArrivedAtAssigner", containerBlock.Header.Height).Return().Once()
+	s.metrics.On("OnExecutionResultReceivedAtAssignerEngine").Return().Once()
 	e.ProcessFinalizedBlock(containerBlock)
 
 	mock.AssertExpectationsForObjects(t,
@@ -269,23 +274,23 @@ func newBlockNoAssignedChunk(t *testing.T) {
 	// creates a container block, with a single receipt, that contains 5 chunks, but
 	// none of them is assigned to this verification node.
 	containerBlock, assignment := createContainerBlock(
-		test.WithChunks(
-			test.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
-			test.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
-			test.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
-			test.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
-			test.WithAssignee(unittest.IdentifierFixture()))) // assigned to others
-	result := &containerBlock.Payload.Receipts[0].ExecutionResult
+		vertestutils.WithChunks(
+			vertestutils.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
+			vertestutils.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
+			vertestutils.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
+			vertestutils.WithAssignee(unittest.IdentifierFixture()),  // assigned to others
+			vertestutils.WithAssignee(unittest.IdentifierFixture()))) // assigned to others
+	result := containerBlock.Payload.Results[0]
 	s.mockStateAtBlockID(result.BlockID)
-	chunksNum := s.mockChunkAssigner(result, assignment)
+	chunksNum := s.mockChunkAssigner(flow.NewIncorporatedResult(containerBlock.ID(), result), assignment)
 	require.Equal(t, chunksNum, 0) // no chunk should be assigned
 
 	// once assigner engine is done processing the block, it should notify the processing notifier.
 	s.notifier.On("Notify", containerBlock.ID()).Return().Once()
 
 	// sends block containing receipt to assigner engine
-	s.metrics.On("OnAssignerProcessFinalizedBlock", containerBlock.Header.Height).Return().Once()
-	s.metrics.On("OnExecutionReceiptReceived").Return().Once()
+	s.metrics.On("OnFinalizedBlockArrivedAtAssigner", containerBlock.Header.Height).Return().Once()
+	s.metrics.On("OnExecutionResultReceivedAtAssignerEngine").Return().Once()
 	e.ProcessFinalizedBlock(containerBlock)
 
 	mock.AssertExpectationsForObjects(t,
@@ -309,36 +314,37 @@ func newBlockMultipleAssignment(t *testing.T) {
 	// creates a container block, with a single receipt, that contains 5 chunks, but
 	// only 3 of them is assigned to this verification node.
 	containerBlock, assignment := createContainerBlock(
-		test.WithChunks(
-			test.WithAssignee(unittest.IdentifierFixture()), // assigned to others
-			test.WithAssignee(s.myID()),                     // assigned to me
-			test.WithAssignee(s.myID()),                     // assigned to me
-			test.WithAssignee(unittest.IdentifierFixture()), // assigned to others
-			test.WithAssignee(s.myID())))                    // assigned to me
-	result := &containerBlock.Payload.Receipts[0].ExecutionResult
+		vertestutils.WithChunks(
+			vertestutils.WithAssignee(unittest.IdentifierFixture()), // assigned to others
+			vertestutils.WithAssignee(s.myID()),                     // assigned to me
+			vertestutils.WithAssignee(s.myID()),                     // assigned to me
+			vertestutils.WithAssignee(unittest.IdentifierFixture()), // assigned to others
+			vertestutils.WithAssignee(s.myID())))                    // assigned to me
+	result := containerBlock.Payload.Results[0]
 	s.mockStateAtBlockID(result.BlockID)
-	chunksNum := s.mockChunkAssigner(result, assignment)
+	chunksNum := s.mockChunkAssigner(flow.NewIncorporatedResult(containerBlock.ID(), result), assignment)
 	require.Equal(t, chunksNum, 3) // 3 chunks should be assigned
 
 	// mocks processing assigned chunks
 	// each assigned chunk should be stored in the chunks queue and new chunk listener should be
 	// invoked for it.
-	s.chunksQueue.On("StoreChunkLocator", mock.Anything).Return(true, nil).Times(chunksNum)
+	chunksQueueWG := mockChunksQueueForAssignment(t, s.verIdentity.NodeID, s.chunksQueue, result.ID(), assignment, true, nil)
 	s.newChunkListener.On("Check").Return().Times(chunksNum)
-	s.metrics.On("OnChunkProcessed").Return().Times(chunksNum)
+	s.metrics.On("OnAssignedChunkProcessedAtAssigner").Return().Times(chunksNum)
 
 	// once assigner engine is done processing the block, it should notify the processing notifier.
 	s.notifier.On("Notify", containerBlock.ID()).Return().Once()
 
 	// sends containerBlock containing receipt to assigner engine
-	s.metrics.On("OnAssignerProcessFinalizedBlock", containerBlock.Header.Height).Return().Once()
-	s.metrics.On("OnExecutionReceiptReceived").Return().Once()
+	s.metrics.On("OnFinalizedBlockArrivedAtAssigner", containerBlock.Header.Height).Return().Once()
+	s.metrics.On("OnExecutionResultReceivedAtAssignerEngine").Return().Once()
 	e.ProcessFinalizedBlock(containerBlock)
+
+	unittest.RequireReturnsBefore(t, chunksQueueWG.Wait, 10*time.Millisecond, "could not receive chunk locators")
 
 	mock.AssertExpectationsForObjects(t,
 		s.metrics,
 		s.assigner,
-		s.chunksQueue,
 		s.notifier,
 		s.newChunkListener)
 }
@@ -352,32 +358,61 @@ func chunkQueueUnhappyPathDuplicate(t *testing.T) {
 	// creates a container block, with a single receipt, that contains a single chunk assigned
 	// to verification node.
 	containerBlock, assignment := createContainerBlock(
-		test.WithChunks(test.WithAssignee(s.myID())))
-	result := &containerBlock.Payload.Receipts[0].ExecutionResult
+		vertestutils.WithChunks(vertestutils.WithAssignee(s.myID())))
+	result := containerBlock.Payload.Results[0]
 	s.mockStateAtBlockID(result.BlockID)
-	chunksNum := s.mockChunkAssigner(result, assignment)
+	chunksNum := s.mockChunkAssigner(flow.NewIncorporatedResult(containerBlock.ID(), result), assignment)
 	require.Equal(t, chunksNum, 1)
 
 	// mocks processing assigned chunks
 	// adding new chunks to queue returns false, which means a duplicate chunk.
-	s.chunksQueue.On("StoreChunkLocator", mock.Anything).
-		Return(false, nil).
-		Times(chunksNum)
+	chunksQueueWG := mockChunksQueueForAssignment(t, s.verIdentity.NodeID, s.chunksQueue, result.ID(), assignment, false, nil)
 
 	// once assigner engine is done processing the block, it should notify the processing notifier.
 	s.notifier.On("Notify", containerBlock.ID()).Return().Once()
 
 	// sends block containing receipt to assigner engine
-	s.metrics.On("OnAssignerProcessFinalizedBlock", containerBlock.Header.Height).Return().Once()
-	s.metrics.On("OnExecutionReceiptReceived").Return().Once()
+	s.metrics.On("OnFinalizedBlockArrivedAtAssigner", containerBlock.Header.Height).Return().Once()
+	s.metrics.On("OnExecutionResultReceivedAtAssignerEngine").Return().Once()
 	e.ProcessFinalizedBlock(containerBlock)
+
+	unittest.RequireReturnsBefore(t, chunksQueueWG.Wait, 10*time.Millisecond, "could not receive chunk locators")
 
 	mock.AssertExpectationsForObjects(t,
 		s.metrics,
 		s.assigner,
-		s.chunksQueue,
 		s.notifier)
 
 	// job listener should not be notified as no new chunk is added.
 	s.newChunkListener.AssertNotCalled(t, "Check")
+}
+
+// mockChunksQueueForAssignment mocks chunks queue against invoking its store functionality for the
+// input assignment.
+// The mocked version of chunks queue evaluates that whatever chunk locator is tried to be stored belongs to the
+// assigned list of chunks for specified execution result (i.e., a valid input).
+// It also mocks the chunks queue to return the specified boolean and error values upon trying to store a valid input.
+func mockChunksQueueForAssignment(t *testing.T,
+	verId flow.Identifier,
+	chunksQueue *storage.ChunksQueue,
+	resultID flow.Identifier,
+	assignment *chunks.Assignment,
+	returnBool bool,
+	returnError error) *sync.WaitGroup {
+
+	wg := &sync.WaitGroup{}
+	wg.Add(len(assignment.ByNodeID(verId)))
+	chunksQueue.On("StoreChunkLocator", mock.Anything).Run(func(args mock.Arguments) {
+		// should be a chunk locator
+		locator, ok := args[0].(*chunks.Locator)
+		require.True(t, ok)
+
+		// should belong to the expected execution result and assigned chunk
+		require.Equal(t, resultID, locator.ResultID)
+		require.Contains(t, assignment.ByNodeID(verId), locator.Index)
+
+		wg.Done()
+	}).Return(returnBool, returnError)
+
+	return wg
 }

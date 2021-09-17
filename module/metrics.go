@@ -9,8 +9,25 @@ import (
 
 type EntriesFunc func() uint
 
-// Network Metrics
+// ResolverMetrics encapsulates the metrics collectors for dns resolver module of the networking layer.
+type ResolverMetrics interface {
+	// DNSLookupDuration tracks the time spent to resolve a DNS address.
+	DNSLookupDuration(duration time.Duration)
+
+	// OnDNSCacheMiss tracks the total number of dns requests resolved through looking up the network.
+	OnDNSCacheMiss()
+
+	// DNSCacheResolution tracks the total number of dns requests resolved through the cache without
+	// looking up the network.
+	OnDNSCacheHit()
+
+	// OnDNSCacheInvalidated is called whenever dns cache is invalidated for an entry
+	OnDNSCacheInvalidated()
+}
+
 type NetworkMetrics interface {
+	ResolverMetrics
+
 	// NetworkMessageSent size in bytes and count of the network message sent
 	NetworkMessageSent(sizeBytes int, topic string, messageType string)
 
@@ -38,6 +55,12 @@ type NetworkMetrics interface {
 
 	// InboundConnections updates the metric tracking the number of inbound connections of this node
 	InboundConnections(connectionCount uint)
+
+	// UnstakedOutboundConnections updates the metric tracking the number of outbound connections to unstaked nodes
+	UnstakedOutboundConnections(connectionCount uint)
+
+	// UnstakedInboundConnections updates the metric tracking the number of inbound connections from unstaked nodes
+	UnstakedInboundConnections(connectionCount uint)
 }
 
 type EngineMetrics interface {
@@ -48,10 +71,17 @@ type EngineMetrics interface {
 
 type ComplianceMetrics interface {
 	FinalizedHeight(height uint64)
+	CommittedEpochFinalView(view uint64)
 	SealedHeight(height uint64)
 	BlockFinalized(*flow.Block)
 	BlockSealed(*flow.Block)
 	BlockProposalDuration(duration time.Duration)
+	CurrentEpochCounter(counter uint64)
+	CurrentEpochPhase(phase flow.EpochPhase)
+	CurrentEpochFinalView(view uint64)
+	CurrentDKGPhase1FinalView(view uint64)
+	CurrentDKGPhase2FinalView(view uint64)
+	CurrentDKGPhase3FinalView(view uint64)
 }
 
 type CleanerMetrics interface {
@@ -59,8 +89,13 @@ type CleanerMetrics interface {
 }
 
 type CacheMetrics interface {
+	// report the total number of cached items
 	CacheEntries(resource string, entries uint)
+	// report the number of times the queried item is found in the cache
 	CacheHit(resource string)
+	// report the number of items the queried item is not found in the cache, nor found in the database
+	CacheNotFound(resource string)
+	// report the number of items the queried item is not found in the cache, but found in the database
 	CacheMiss(resource string)
 }
 
@@ -154,58 +189,70 @@ type ConsensusMetrics interface {
 }
 
 type VerificationMetrics interface {
-	// Finder Engine
-	//
-	// OnExecutionReceiptReceived is called whenever a new execution receipt arrives
-	// at Finder engine. It increments total number of received receipts.
-	OnExecutionReceiptReceived()
-	// OnExecutionResultSent is called whenever a new execution result is sent by
-	// Finder engine to the match engine. It increments total number of sent execution results.
-	OnExecutionResultSent()
+	// OnBlockConsumerJobDone is invoked by block consumer whenever it is notified a job is done by a worker. It
+	// sets the last processed block job index.
+	OnBlockConsumerJobDone(uint64)
+	// OnChunkConsumerJobDone is invoked by chunk consumer whenever it is notified a job is done by a worker. It
+	// sets the last processed chunk job index.
+	OnChunkConsumerJobDone(uint64)
+	// OnExecutionResultReceivedAtAssignerEngine is called whenever a new execution result arrives
+	// at Assigner engine. It increments total number of received execution results.
+	OnExecutionResultReceivedAtAssignerEngine()
 
-	// Match Engine
-	//
-	// OnExecutionResultReceived is called whenever a new execution result is successfully received
-	// by Match engine from Finder engine.
-	// It increments the total number of received execution results.
-	OnExecutionResultReceived()
-	// OnVerifiableChunkSent is called on a successful submission of matched chunk
-	// by Match engine to Verifier engine.
-	// It increments the total number of chunks matched by match engine.
-	OnVerifiableChunkSent()
+	// OnVerifiableChunkReceivedAtVerifierEngine increments a counter that keeps track of number of verifiable chunks received at
+	// verifier engine from fetcher engine.
+	OnVerifiableChunkReceivedAtVerifierEngine()
 
-	// OnChunkDataPackReceived is called on a receiving a chunk data pack by Match engine
-	// It increments the total number of chunk data packs received.
-	OnChunkDataPackReceived()
+	// OnFinalizedBlockArrivedAtAssigner sets a gauge that keeps track of number of the latest block height arrives
+	// at assigner engine. Note that it assumes blocks are coming to assigner engine in strictly increasing order of their height.
+	OnFinalizedBlockArrivedAtAssigner(height uint64)
 
-	// OnChunkDataPackRequested is called on requesting a chunk data pack by Match engine
-	// It increments the total number of chunk data packs requested.
-	OnChunkDataPackRequested()
+	// OnChunksAssignmentDoneAtAssigner increments a counter that keeps track of the total number of assigned chunks to
+	// the verification node.
+	OnChunksAssignmentDoneAtAssigner(chunks int)
 
-	// Verifier Engine
-	//
-	// OnVerifiableChunkReceived is called whenever a verifiable chunk is received by Verifier engine
-	// from Match engine.It increments the total number of sent verifiable chunks.
-	OnVerifiableChunkReceived()
-	// OnResultApproval is called whenever a result approval for is emitted to consensus nodes.
-	// It increases the total number of result approvals.
-	OnResultApproval()
+	// OnAssignedChunkProcessedAtAssigner increments a counter that keeps track of the total number of assigned chunks pushed by
+	// assigner engine to the fetcher engine.
+	OnAssignedChunkProcessedAtAssigner()
 
-	// OnFinalizedBlockReceived is called whenever a finalized block arrives at the assigner engine.
-	// It increments the total number of finalized blocks.
-	//
-	//
-	// Note: it assumes blocks are coming to assigner engine in strictly increasing order of their height.
-	OnAssignerProcessFinalizedBlock(height uint64)
+	// OnAssignedChunkReceivedAtFetcher increments a counter that keeps track of number of assigned chunks arrive at fetcher engine.
+	OnAssignedChunkReceivedAtFetcher()
 
-	// OnChunksAssigned is called whenever chunks assigned to this verification node by applying chunk assignment on an
-	// execution result.
-	// It increases the total number of assigned chunks by the input.
-	OnChunksAssigned(chunks int)
+	// OnChunkDataPackRequestSentByFetcher increments a counter that keeps track of number of chunk data pack requests that fetcher engine
+	// sends to requester engine.
+	OnChunkDataPackRequestSentByFetcher()
 
-	// OnChunkProcessed is called whenever a chunk is pushed to the chunks queue by the assigner engine.
-	// It increments the total number of sent chunks.
-	OnChunkProcessed()
+	// OnChunkDataPackRequestReceivedByRequester increments a counter that keeps track of number of chunk data pack requests
+	// arrive at the requester engine from the fetcher engine.
+	OnChunkDataPackRequestReceivedByRequester()
+
+	// OnChunkDataPackRequestDispatchedInNetwork increments a counter that keeps track of number of chunk data pack requests that the
+	// requester engine dispatches in the network (to the execution nodes).
+	OnChunkDataPackRequestDispatchedInNetworkByRequester()
+
+	// OnChunkDataPackResponseReceivedFromNetwork increments a counter that keeps track of number of chunk data pack responses that the
+	// requester engine receives from execution nodes (through network).
+	OnChunkDataPackResponseReceivedFromNetworkByRequester()
+
+	// SetMaxChunkDataPackAttemptsForNextUnsealedHeightAtRequester is invoked when a cycle of requesting chunk data packs is done by requester engine.
+	// It updates the maximum number of attempts made by requester engine for requesting the chunk data packs of the next unsealed height.
+	// The maximum is taken over the history of all chunk data packs requested during that cycle that belong to the next unsealed height.
+	SetMaxChunkDataPackAttemptsForNextUnsealedHeightAtRequester(attempts uint64)
+
+	// OnChunkDataPackSentToFetcher increments a counter that keeps track of number of chunk data packs sent to the fetcher engine from
+	// requester engine.
+	OnChunkDataPackSentToFetcher()
+
+	// OnChunkDataPackArrivedAtFetcher increments a counter that keeps track of number of chunk data packs arrived at fetcher engine from
+	// requester engine.
+	OnChunkDataPackArrivedAtFetcher()
+
+	// OnVerifiableChunkSentToVerifier increments a counter that keeps track of number of verifiable chunks fetcher engine sent to verifier engine.
+	OnVerifiableChunkSentToVerifier()
+
+	// OnResultApprovalDispatchedInNetwork increments a counter that keeps track of number of result approvals dispatched in the network
+	// by verifier engine.
+	OnResultApprovalDispatchedInNetworkByVerifier()
 }
 
 // LedgerMetrics provides an interface to record Ledger Storage metrics.
@@ -259,20 +306,25 @@ type LedgerMetrics interface {
 
 	// ReadDurationPerItem records read time for single value (total duration / number of read values)
 	ReadDurationPerItem(duration time.Duration)
+}
 
+type WALMetrics interface {
 	// DiskSize records the amount of disk space used by the storage (in bytes)
 	DiskSize(uint64)
 }
 
 type RuntimeMetrics interface {
 	// TransactionParsed reports the time spent parsing a single transaction
-	TransactionParsed(dur time.Duration)
+	RuntimeTransactionParsed(dur time.Duration)
 
 	// TransactionChecked reports the time spent checking a single transaction
-	TransactionChecked(dur time.Duration)
+	RuntimeTransactionChecked(dur time.Duration)
 
 	// TransactionInterpreted reports the time spent interpreting a single transaction
-	TransactionInterpreted(dur time.Duration)
+	RuntimeTransactionInterpreted(dur time.Duration)
+
+	// RuntimeSetNumberOfAccounts Sets the total number of accounts on the network
+	RuntimeSetNumberOfAccounts(count uint64)
 }
 
 type ProviderMetrics interface {
@@ -285,6 +337,7 @@ type ExecutionMetrics interface {
 	LedgerMetrics
 	RuntimeMetrics
 	ProviderMetrics
+	WALMetrics
 
 	// StartBlockReceivedToExecuted starts a span to trace the duration of a block
 	// from being received for execution to execution being finished
@@ -293,9 +346,6 @@ type ExecutionMetrics interface {
 	// FinishBlockReceivedToExecuted finishes a span to trace the duration of a block
 	// from being received for execution to execution being finished
 	FinishBlockReceivedToExecuted(blockID flow.Identifier)
-
-	// ExecutionGasUsedPerBlock reports gas used per block
-	ExecutionGasUsedPerBlock(gas uint64)
 
 	// ExecutionStateReadsPerBlock reports number of state access/read operations per block
 	ExecutionStateReadsPerBlock(reads uint64)
@@ -306,8 +356,17 @@ type ExecutionMetrics interface {
 	// ExecutionLastExecutedBlockHeight reports last executed block height
 	ExecutionLastExecutedBlockHeight(height uint64)
 
-	// ExecutionTotalExecutedTransactions adds num to the total number of executed transactions
-	ExecutionTotalExecutedTransactions(numExecuted int)
+	// ExecutionBlockExecuted reports the total time and computation spent on executing a block
+	ExecutionBlockExecuted(dur time.Duration, compUsed uint64, txCounts int, colCounts int)
+
+	// ExecutionCollectionExecuted reports the total time and computation spent on executing a collection
+	ExecutionCollectionExecuted(dur time.Duration, compUsed uint64, txCounts int)
+
+	// ExecutionTransactionExecuted reports the total time and computation spent on executing a single transaction
+	ExecutionTransactionExecuted(dur time.Duration, compUsed uint64, eventCounts int, failed bool)
+
+	// ExecutionScriptExecuted reports the time spent on executing an script
+	ExecutionScriptExecuted(dur time.Duration, compUsed uint64)
 
 	// ExecutionCollectionRequestSent reports when a request for a collection is sent to a collection node
 	ExecutionCollectionRequestSent()
@@ -317,6 +376,10 @@ type ExecutionMetrics interface {
 
 	// ExecutionSync reports when the state syncing is triggered or stopped.
 	ExecutionSync(syncing bool)
+
+	ExecutionBlockDataUploadStarted()
+
+	ExecutionBlockDataUploadFinished(dur time.Duration)
 }
 
 type TransactionMetrics interface {
@@ -342,4 +405,7 @@ type PingMetrics interface {
 	// NodeReachable tracks the round trip time in milliseconds taken to ping a node
 	// The nodeInfo provides additional information about the node such as the name of the node operator
 	NodeReachable(node *flow.Identity, nodeInfo string, rtt time.Duration)
+
+	// NodeInfo tracks the software version and sealed height of a node
+	NodeInfo(node *flow.Identity, nodeInfo string, version string, sealedHeight uint64)
 }

@@ -47,13 +47,13 @@ func ExportExecutedTransactions(blockID flow.Identifier, dbPath string, outputPa
 
 	cacheMetrics := &metrics.NoopCollector{}
 	index := badger.NewIndex(cacheMetrics, db)
-	guarantees := badger.NewGuarantees(cacheMetrics, db)
+	guarantees := badger.NewGuarantees(cacheMetrics, db, badger.DefaultCacheSize)
 	seals := badger.NewSeals(cacheMetrics, db)
 	results := badger.NewExecutionResults(cacheMetrics, db)
-	receipts := badger.NewExecutionReceipts(cacheMetrics, db, results)
+	receipts := badger.NewExecutionReceipts(cacheMetrics, db, results, badger.DefaultCacheSize)
 	transactions := badger.NewTransactions(cacheMetrics, db)
 	headers := badger.NewHeaders(cacheMetrics, db)
-	payloads := badger.NewPayloads(db, index, guarantees, seals, receipts)
+	payloads := badger.NewPayloads(db, index, guarantees, seals, receipts, results)
 	blocks := badger.NewBlocks(db, headers, payloads)
 	collections := badger.NewCollections(db, transactions)
 

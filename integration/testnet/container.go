@@ -11,15 +11,19 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/go-connections/nat"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dapperlabs/testingdock"
 
 	"github.com/onflow/flow-go/model/bootstrap"
+	"github.com/onflow/flow-go/module/metrics"
+	state "github.com/onflow/flow-go/state/protocol/badger"
+	"github.com/onflow/flow-go/state/protocol/inmem"
+	storage "github.com/onflow/flow-go/storage/badger"
 )
 
 var (
-	defaultRegistry = "gcr.io/flow-container-registry"
-
+	defaultRegistry       = "gcr.io/flow-container-registry"
 	checkContainerTimeout = time.Second * 10
 	checkContainerPeriod  = time.Millisecond * 50
 )
@@ -34,10 +38,13 @@ func init() {
 // ContainerConfig represents configuration for a node container in the network.
 type ContainerConfig struct {
 	bootstrap.NodeInfo
-	ContainerName   string
-	LogLevel        zerolog.Level
-	Ghost           bool
-	AdditionalFlags []string
+	ContainerName         string
+	LogLevel              zerolog.Level
+	Ghost                 bool
+	AdditionalFlags       []string
+	Debug                 bool
+	Unstaked              bool
+	SupportsUnstakedNodes bool
 }
 
 // ImageName returns the Docker image name for the given config.
@@ -45,7 +52,11 @@ func (c *ContainerConfig) ImageName() string {
 	if c.Ghost {
 		return defaultRegistry + "/ghost:latest"
 	}
-	return fmt.Sprintf("%s/%s:latest", defaultRegistry, c.Role.String())
+	debugSuffix := ""
+	if c.Debug {
+		debugSuffix = "-debug"
+	}
+	return fmt.Sprintf("%s/%s%s:latest", defaultRegistry, c.Role.String(), debugSuffix)
 }
 
 // Container represents a test Docker container for a generic Flow node.
@@ -122,14 +133,37 @@ func (c *Container) Name() string {
 
 // DB returns the node's database.
 func (c *Container) DB() (*badger.DB, error) {
-	dbPath := filepath.Join(c.datadir, DefaultFlowDBDir)
 	opts := badger.
-		DefaultOptions(dbPath).
+		DefaultOptions(c.DBPath()).
 		WithKeepL0InMemory(true).
 		WithLogger(nil)
 
 	db, err := badger.Open(opts)
 	return db, err
+}
+
+func (c *Container) DBPath() string {
+	return filepath.Join(c.datadir, DefaultFlowDBDir)
+}
+
+func (c *Container) BootstrapPath() string {
+	return filepath.Join(c.datadir, DefaultBootstrapDir)
+}
+
+// DropDB resets the node's database.
+func (c *Container) DropDB() {
+	err := os.RemoveAll(c.DBPath())
+	require.NoError(c.net.t, err)
+	err = os.Mkdir(c.DBPath(), 0700)
+	require.NoError(c.net.t, err)
+}
+
+// WriteRootSnapshot overwrites the root protocol state snapshot file with the
+// provided state snapshot.
+func (c *Container) WriteRootSnapshot(snap *inmem.Snapshot) {
+	rootSnapshotPath := filepath.Join(c.BootstrapPath(), bootstrap.PathRootProtocolStateSnapshot)
+	err := WriteJSON(rootSnapshotPath, snap.Encodable())
+	require.NoError(c.net.t, err)
 }
 
 // Pause stops this container temporarily, preserving its state. It can be
@@ -208,6 +242,38 @@ func (c *Container) Connect() error {
 	}
 
 	return nil
+}
+
+func (c *Container) OpenState() (*state.State, error) {
+	db, err := c.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	metrics := metrics.NewNoopCollector()
+	index := storage.NewIndex(metrics, db)
+	headers := storage.NewHeaders(metrics, db)
+	seals := storage.NewSeals(metrics, db)
+	results := storage.NewExecutionResults(metrics, db)
+	receipts := storage.NewExecutionReceipts(metrics, db, results, storage.DefaultCacheSize)
+	guarantees := storage.NewGuarantees(metrics, db, storage.DefaultCacheSize)
+	payloads := storage.NewPayloads(db, index, guarantees, seals, receipts, results)
+	blocks := storage.NewBlocks(db, headers, payloads)
+	setups := storage.NewEpochSetups(metrics, db)
+	commits := storage.NewEpochCommits(metrics, db)
+	statuses := storage.NewEpochStatuses(metrics, db)
+
+	return state.OpenState(
+		metrics,
+		db,
+		headers,
+		seals,
+		results,
+		blocks,
+		setups,
+		commits,
+		statuses,
+	)
 }
 
 // containerStopped returns true if the container is not running.

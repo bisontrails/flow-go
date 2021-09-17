@@ -7,8 +7,10 @@ import (
 
 	"github.com/onflow/flow-go/consensus/hotstuff"
 	"github.com/onflow/flow-go/consensus/hotstuff/committees/leader"
+	"github.com/onflow/flow-go/consensus/hotstuff/model"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/model/flow/filter"
+	"github.com/onflow/flow-go/model/indices"
 	"github.com/onflow/flow-go/state/protocol"
 )
 
@@ -65,19 +67,23 @@ func NewConsensusCommittee(state protocol.State, me flow.Identifier) (*Consensus
 }
 
 func (c *Consensus) Identities(blockID flow.Identifier, selector flow.IdentityFilter) (flow.IdentityList, error) {
-	return c.state.AtBlockID(blockID).Identities(filter.And(
+	il, err := c.state.AtBlockID(blockID).Identities(filter.And(
 		filter.IsVotingConsensusCommitteeMember,
 		selector,
 	))
+	return il, err
 }
 
 func (c *Consensus) Identity(blockID flow.Identifier, nodeID flow.Identifier) (*flow.Identity, error) {
 	identity, err := c.state.AtBlockID(blockID).Identity(nodeID)
+	if protocol.IsIdentityNotFound(err) {
+		return nil, model.ErrInvalidSigner
+	}
 	if err != nil {
 		return nil, fmt.Errorf("could not get identity for node ID %x: %w", nodeID, err)
 	}
 	if !filter.IsVotingConsensusCommitteeMember(identity) {
-		return nil, protocol.IdentityNotFoundError{NodeID: nodeID}
+		return nil, model.ErrInvalidSigner
 	}
 	return identity, nil
 }
@@ -124,7 +130,63 @@ func (c *Consensus) LeaderForView(view uint64) (flow.Identifier, error) {
 	// This assumption is equivalent to assuming that we build at least one
 	// block in every epoch, which is anyway a requirement for valid epochs.
 	//
-	next := c.state.Final().Epochs().Next()
+	epochs := c.state.Final().Epochs()
+	next := epochs.Next()
+
+	// TMP: EMERGENCY EPOCH CHAIN CONTINUATION [EECC]
+	//
+	// If we reach this code-path, it means we are about to propose or vote
+	// for the first block in the next epoch. If that epoch has not been
+	// committed or set up, rather than stopping consensus, this intervention
+	// will create a new fallback leader selection for the next epoch containing
+	// 6 months worth of views, so that consensus will have leaders specified
+	// for the duration of the current spork, without any epoch transitions.
+	//
+	_, err = next.DKG() // either of the following errors indicates that we have transitioned into EECC
+	if errors.Is(err, protocol.ErrEpochNotCommitted) || errors.Is(err, protocol.ErrNextEpochNotSetup) {
+		current := epochs.Current()
+
+		currentCounter, err := current.Counter()
+		if err != nil {
+			return flow.ZeroID, fmt.Errorf("could not get next epoch currentCounter: %w", err)
+		}
+		identities, err := current.InitialIdentities()
+		if err != nil {
+			return flow.ZeroID, fmt.Errorf("could not get epoch initial identities: %w", err)
+		}
+		// CAUTION: this is re-using the same leader selection seed from the now-ending epoch
+		seed, err := current.Seed(indices.ProtocolConsensusLeaderSelection...)
+		if err != nil {
+			return flow.ZeroID, fmt.Errorf("could not get epoch seed: %w", err)
+		}
+		currentFinalView, err := current.FinalView()
+		if err != nil {
+			return flow.ZeroID, fmt.Errorf("could not get epoch first view: %w", err)
+		}
+
+		// we will inject a fallback leader selection in place of the next epoch
+		counter := currentCounter + 1
+		// the fallback leader selection begins after the final view of the current epoch
+		firstView := currentFinalView + 1
+		selection, err := leader.ComputeLeaderSelectionFromSeed(
+			firstView,
+			seed,
+			int(firstView+leader.EstimatedSixMonthOfViews), // the fallback epoch lasts until the next spork
+			identities.Filter(filter.IsVotingConsensusCommitteeMember),
+		)
+		if err != nil {
+			return flow.ZeroID, fmt.Errorf("could not compute epoch fallback leader selection: %w", err)
+		}
+		c.mu.Lock()
+		c.leaders[counter] = selection
+		c.mu.Unlock()
+		return selection.LeaderForView(view)
+	}
+	if err != nil {
+		return flow.ZeroID, fmt.Errorf("unexpected error in EECC logic while retrieving DKG data: %w", err)
+	}
+
+	// HAPPY PATH logic
 	selection, err := c.prepareLeaderSelection(next)
 	if err != nil {
 		return flow.ZeroID, fmt.Errorf("could not compute leader selection for next epoch: %w", err)

@@ -1,8 +1,6 @@
 package queue
 
 import (
-	"fmt"
-
 	"github.com/onflow/flow-go/model/flow"
 )
 
@@ -117,25 +115,27 @@ func dequeue(queue *Queue) *Queue {
 // TryAdd(elmt) is an idempotent operation for the same elmt, i.e.
 // after the first, subsequent additions of the same elements are NoOps.
 // Returns:
-// True if and only if _after_ the operation, the element is stored in the
+// stored = True if and only if _after_ the operation, the element is stored in the
 // queue. This is the case if (a) element was newly added to the queue or
 // (b) element was already stored in the queue _before_ the call.
-// Adding an element fails with return value `false` in the following cases:
+// new = Indicates if element was new to the queue, when `stored` was true. It lets
+// distinguish (a) and (b) cases.
+// Adding an element fails with return value `false` for `stored` in the following cases:
 //   * element.ParentID() is _not_ stored in the queue
 //   * element's height is _unequal to_ its parent's height + 1
-func (q *Queue) TryAdd(element Blockify) bool {
+func (q *Queue) TryAdd(element Blockify) (stored bool, new bool) {
 	if _, found := q.Nodes[element.ID()]; found {
 		// (b) element was already stored in the queue _before_ the call.
-		return true
+		return true, false
 	}
 	// at this point, we are sure that the element is _not_ in the queue and therefore,
 	// the element cannot be referenced as a child by any other element in the queue
 	n, ok := q.Nodes[element.ParentID()]
 	if !ok {
-		return false
+		return false, false
 	}
 	if n.Item.Height() != element.Height()-1 {
-		return false
+		return false, false
 	}
 	newNode := &Node{
 		Item:     element,
@@ -150,32 +150,7 @@ func (q *Queue) TryAdd(element Blockify) bool {
 	if element.Height() > q.Highest.Item.Height() {
 		q.Highest = newNode
 	}
-	return true
-}
-
-// Attach joins the other queue to this one, modifying this queue in-place.
-// Other queue be attached if only if the following conditions hold:
-//   * The head of other has a parent in this queue.
-//   * Both queues have no nodes in common. Specifically, this means that
-//     the head of _other_ cannot be a member of this queue.
-// Fails otherwise with an error. CAUTION: failing with an error leaves
-// this queue in a _dysfunctional_ (partially joined) state.
-func (q *Queue) Attach(other *Queue) error {
-	n, ok := q.Nodes[other.Head.Item.ParentID()]
-	if !ok {
-		return fmt.Errorf("other queue head does not reference known parent")
-	}
-	n.Children = append(n.Children, other.Head)
-	for identifier, node := range other.Nodes {
-		if _, ok := q.Nodes[identifier]; ok {
-			return fmt.Errorf("queues have common nodes")
-		}
-		q.Nodes[identifier] = node
-	}
-	if other.Highest.Item.Height() > q.Highest.Item.Height() {
-		q.Highest = other.Highest
-	}
-	return nil
+	return true, true
 }
 
 // Dismount removes the head element, returns it and it's children as new queues

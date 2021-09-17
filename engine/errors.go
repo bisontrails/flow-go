@@ -7,6 +7,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+var (
+	// IncompatibleInputTypeError indicates that the input has an incompatible type
+	IncompatibleInputTypeError = errors.New("incompatible input type")
+)
+
 // InvalidInputError are errors for caused by invalid inputs.
 // It's useful to distinguish these known errors from exceptions.
 // By distinguishing errors from exceptions, we can log them
@@ -123,6 +128,10 @@ func LogError(log zerolog.Logger, err error) {
 }
 
 func LogErrorWithMsg(log zerolog.Logger, msg string, err error) {
+	if err == nil {
+		return
+	}
+
 	// Invalid input errors could be logged as warning, because they can be
 	// part of normal operations when the network is open and anyone can send
 	// weird messages around. However, during the non-BFT phase where we
@@ -140,6 +149,14 @@ func LogErrorWithMsg(log zerolog.Logger, msg string, err error) {
 	// thus be logged as warnings.
 	if IsOutdatedInputError(err) {
 		log.Warn().Str("error_type", "outdated_input").Err(err).Msg(msg)
+		return
+	}
+
+	// Unverifiable input errors may be due to out-of-date node state, or could
+	// indicate a malicious/unexpected message from another node. Since we don't
+	// know, log as warning.
+	if IsUnverifiableInputError(err) {
+		log.Warn().Str("error_type", "unverifiable_input").Err(err).Msg(msg)
 		return
 	}
 

@@ -2,13 +2,14 @@ package access
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
-	"github.com/golang/protobuf/ptypes"
 	"github.com/onflow/flow/protobuf/go/flow/access"
 	"github.com/onflow/flow/protobuf/go/flow/entities"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/onflow/flow-go/engine/common/rpc/convert"
 	"github.com/onflow/flow-go/model/flow"
@@ -34,11 +35,6 @@ func (h *Handler) Ping(ctx context.Context, _ *access.PingRequest) (*access.Ping
 	}
 
 	return &access.PingResponse{}, nil
-}
-
-func (h *Handler) GetLatestProtocolStateSnapshot(_ context.Context,
-	_ *access.GetLatestProtocolStateSnapshotRequest) (*access.ProtocolStateSnapshotResponse, error) {
-	return nil, fmt.Errorf("unimplemented method")
 }
 
 func (h *Handler) GetNetworkParameters(
@@ -411,6 +407,32 @@ func (h *Handler) GetEventsForBlockIDs(
 	}, nil
 }
 
+// GetLatestProtocolStateSnapshot returns the latest serializable Snapshot
+func (h *Handler) GetLatestProtocolStateSnapshot(ctx context.Context, req *access.GetLatestProtocolStateSnapshotRequest) (*access.ProtocolStateSnapshotResponse, error) {
+	snapshot, err := h.api.GetLatestProtocolStateSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &access.ProtocolStateSnapshotResponse{
+		SerializedSnapshot: snapshot,
+	}, nil
+}
+
+// GetExecutionResultForBlockID returns the latest received execution result for the given block ID.
+// AN might receive multiple receipts with conflicting results for unsealed blocks.
+// If this case happens, since AN is not able to determine which result is the correct one until the block is sealed, it has to pick one result to respond to this query. For now, we return the result from the latest received receipt.
+func (h *Handler) GetExecutionResultForBlockID(ctx context.Context, req *access.GetExecutionResultForBlockIDRequest) (*access.ExecutionResultForBlockIDResponse, error) {
+	blockID := convert.MessageToIdentifier(req.GetBlockId())
+
+	result, err := h.api.GetExecutionResultForBlockID(ctx, blockID)
+	if err != nil {
+		return nil, err
+	}
+
+	return executionResultToMessages(result)
+}
+
 func blockResponse(block *flow.Block) (*access.BlockResponse, error) {
 	msg, err := convert.BlockToMessage(block)
 	if err != nil {
@@ -433,6 +455,59 @@ func blockHeaderResponse(header *flow.Header) (*access.BlockHeaderResponse, erro
 	}, nil
 }
 
+func executionResultToMessages(er *flow.ExecutionResult) (*access.ExecutionResultForBlockIDResponse, error) {
+
+	chunks := make([]*entities.Chunk, len(er.Chunks))
+
+	for i, chunk := range er.Chunks {
+		chunks[i] = chunkToMessage(chunk)
+	}
+
+	serviceEvents := make([]*entities.ServiceEvent, len(er.ServiceEvents))
+	var err error
+	for i, serviceEvent := range er.ServiceEvents {
+		serviceEvents[i], err = serviceEventToMessage(serviceEvent)
+		if err != nil {
+			return nil, fmt.Errorf("error while convering service event %d: %w", i, err)
+		}
+	}
+
+	return &access.ExecutionResultForBlockIDResponse{
+		ExecutionResult: &entities.ExecutionResult{
+			PreviousResultId: convert.IdentifierToMessage(er.PreviousResultID),
+			BlockId:          convert.IdentifierToMessage(er.BlockID),
+			Chunks:           chunks,
+			ServiceEvents:    serviceEvents,
+		},
+	}, nil
+}
+
+func serviceEventToMessage(event flow.ServiceEvent) (*entities.ServiceEvent, error) {
+
+	bytes, err := json.Marshal(event.Event)
+	if err != nil {
+		return nil, fmt.Errorf("cannot marshal service event: %w", err)
+	}
+
+	return &entities.ServiceEvent{
+		Type:    event.Type,
+		Payload: bytes,
+	}, nil
+}
+
+func chunkToMessage(chunk *flow.Chunk) *entities.Chunk {
+	return &entities.Chunk{
+		CollectionIndex:      uint32(chunk.CollectionIndex),
+		StartState:           convert.StateCommitmentToMessage(chunk.StartState),
+		EventCollection:      convert.IdentifierToMessage(chunk.EventCollection),
+		BlockId:              convert.IdentifierToMessage(chunk.BlockID),
+		TotalComputationUsed: chunk.TotalComputationUsed,
+		NumberOfTransactions: uint32(chunk.NumberOfTransactions),
+		Index:                chunk.Index,
+		EndState:             convert.StateCommitmentToMessage(chunk.EndState),
+	}
+}
+
 func blockEventsToMessages(blocks []flow.BlockEvents) ([]*access.EventsResponse_Result, error) {
 	results := make([]*access.EventsResponse_Result, len(blocks))
 
@@ -452,10 +527,7 @@ func blockEventsToMessage(block flow.BlockEvents) (*access.EventsResponse_Result
 	for i, event := range block.Events {
 		eventMessages[i] = convert.EventToMessage(event)
 	}
-	timestamp, err := ptypes.TimestampProto(block.BlockTimestamp)
-	if err != nil {
-		return nil, err
-	}
+	timestamp := timestamppb.New(block.BlockTimestamp)
 	return &access.EventsResponse_Result{
 		BlockId:        block.BlockID[:],
 		BlockHeight:    block.BlockHeight,

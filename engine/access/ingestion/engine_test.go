@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/onflow/flow-go/consensus/hotstuff/model"
+	hotmodel "github.com/onflow/flow-go/consensus/hotstuff/model"
 	"github.com/onflow/flow-go/engine"
 	"github.com/onflow/flow-go/engine/access/rpc"
 	"github.com/onflow/flow-go/model/flow"
@@ -46,6 +46,7 @@ type Suite struct {
 	collections  *storage.Collections
 	transactions *storage.Transactions
 	receipts     *storage.ExecutionReceipts
+	results      *storage.ExecutionResults
 
 	eng *Engine
 }
@@ -82,6 +83,8 @@ func (suite *Suite) SetupTest() {
 	suite.headers = new(storage.Headers)
 	suite.collections = new(storage.Collections)
 	suite.transactions = new(storage.Transactions)
+	suite.receipts = new(storage.ExecutionReceipts)
+	suite.results = new(storage.ExecutionResults)
 	collectionsToMarkFinalized, err := stdmap.NewTimes(100)
 	require.NoError(suite.T(), err)
 	collectionsToMarkExecuted, err := stdmap.NewTimes(100)
@@ -89,11 +92,11 @@ func (suite *Suite) SetupTest() {
 	blocksToMarkExecuted, err := stdmap.NewTimes(100)
 	require.NoError(suite.T(), err)
 
-	rpcEng := rpc.New(log, suite.proto.state, rpc.Config{}, nil, nil, nil, suite.blocks, suite.headers, suite.collections,
-		suite.transactions, suite.receipts, flow.Testnet, metrics.NewNoopCollector(), 0, 0, false, false, nil, nil)
+	rpcEng := rpc.New(log, suite.proto.state, rpc.Config{}, nil, nil, suite.blocks, suite.headers, suite.collections,
+		suite.transactions, suite.receipts, suite.results, flow.Testnet, metrics.NewNoopCollector(), 0, 0, false, false, nil, nil)
 
 	eng, err := New(log, net, suite.proto.state, suite.me, suite.request, suite.blocks, suite.headers, suite.collections,
-		suite.transactions, suite.receipts, metrics.NewNoopCollector(), collectionsToMarkFinalized, collectionsToMarkExecuted,
+		suite.transactions, suite.results, suite.receipts, metrics.NewNoopCollector(), collectionsToMarkFinalized, collectionsToMarkExecuted,
 		blocksToMarkExecuted, rpcEng)
 	require.NoError(suite.T(), err)
 
@@ -105,7 +108,10 @@ func (suite *Suite) SetupTest() {
 func (suite *Suite) TestOnFinalizedBlock() {
 
 	block := unittest.BlockFixture()
-	modelBlock := model.Block{
+	block.SetPayload(unittest.PayloadFixture(
+		unittest.WithGuarantees(unittest.CollectionGuaranteesFixture(4)...),
+	))
+	hotstuffBlock := hotmodel.Block{
 		BlockID: block.ID(),
 	}
 
@@ -135,7 +141,7 @@ func (suite *Suite) TestOnFinalizedBlock() {
 	)
 
 	// process the block through the finalized callback
-	suite.eng.OnFinalizedBlock(&modelBlock)
+	suite.eng.OnFinalizedBlock(&hotstuffBlock)
 
 	// wait for engine shutdown
 	done := suite.eng.unit.Done()
@@ -195,6 +201,50 @@ func (suite *Suite) TestOnCollection() {
 	suite.transactions.AssertNumberOfCalls(suite.T(), "Store", len(collection.Transactions))
 }
 
+// TestExecutionResultsAreIndexed checks that execution results are properly indexedd
+func (suite *Suite) TestExecutionResultsAreIndexed() {
+
+	originID := unittest.IdentifierFixture()
+	collection := unittest.CollectionFixture(5)
+	light := collection.Light()
+
+	// we should store the light collection and index its transactions
+	suite.collections.On("StoreLightAndIndexByTransaction", &light).Return(nil).Once()
+
+	// for each transaction in the collection, we should store it
+	needed := make(map[flow.Identifier]struct{})
+	for _, txID := range light.Transactions {
+		needed[txID] = struct{}{}
+	}
+	suite.transactions.On("Store", mock.Anything).Return(nil).Run(
+		func(args mock.Arguments) {
+			tx := args.Get(0).(*flow.TransactionBody)
+			_, pending := needed[tx.ID()]
+			suite.Assert().True(pending, "tx not pending (%x)", tx.ID())
+		},
+	)
+	er1 := unittest.ExecutionReceiptFixture()
+	er2 := unittest.ExecutionReceiptFixture()
+
+	suite.receipts.On("Store", mock.Anything).Return(nil)
+	suite.results.On("ForceIndex", mock.Anything, mock.Anything).Return(nil)
+	suite.blocks.On("ByID", er1.ExecutionResult.BlockID).Return(nil, storerr.ErrNotFound)
+
+	suite.receipts.On("Store", mock.Anything).Return(nil)
+	suite.results.On("ForceIndex", mock.Anything, mock.Anything).Return(nil)
+	suite.blocks.On("ByID", er2.ExecutionResult.BlockID).Return(nil, storerr.ErrNotFound)
+
+	err := suite.eng.handleExecutionReceipt(originID, er1)
+	require.NoError(suite.T(), err)
+
+	err = suite.eng.handleExecutionReceipt(originID, er2)
+	require.NoError(suite.T(), err)
+
+	suite.receipts.AssertExpectations(suite.T())
+	suite.results.AssertExpectations(suite.T())
+	suite.receipts.AssertExpectations(suite.T())
+}
+
 // TestOnCollection checks that when a duplicate collection is received, the node doesn't
 // crash but just ignores its transactions.
 func (suite *Suite) TestOnCollectionDuplicate() {
@@ -250,6 +300,9 @@ func (suite *Suite) TestRequestMissingCollections() {
 	var collIDs []flow.Identifier
 	for i := 0; i < blkCnt; i++ {
 		block := unittest.BlockFixture()
+		block.SetPayload(unittest.PayloadFixture(
+			unittest.WithGuarantees(unittest.CollectionGuaranteesFixture(4)...),
+		))
 		// some blocks may not be present hence add a gap
 		height := startHeight + uint64(i)
 		block.Header.Height = height
@@ -365,17 +418,17 @@ func (suite *Suite) TestUpdateLastFullBlockReceivedIndex() {
 
 	// generate the test blocks, cgs and collections
 	for i := 0; i < blkCnt; i++ {
-		cgs := make([]*flow.CollectionGuarantee, collPerBlk)
+		guarantees := make([]*flow.CollectionGuarantee, collPerBlk)
 		for j := 0; j < collPerBlk; j++ {
 			coll := unittest.CollectionFixture(2).Light()
 			collMap[coll.ID()] = &coll
 			cg := unittest.CollectionGuaranteeFixture(func(cg *flow.CollectionGuarantee) {
 				cg.CollectionID = coll.ID()
 			})
-			cgs[j] = cg
+			guarantees[j] = cg
 		}
 		block := unittest.BlockFixture()
-		block.Payload.Guarantees = cgs
+		block.SetPayload(unittest.PayloadFixture(unittest.WithGuarantees(guarantees...)))
 		// set the height
 		height := startHeight + uint64(i)
 		block.Header.Height = height

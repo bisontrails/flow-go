@@ -1,164 +1,119 @@
 package matching
 
 import (
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/onflow/flow-go/engine"
+	mockconsensus "github.com/onflow/flow-go/engine/consensus/mock"
 	"github.com/onflow/flow-go/model/flow"
-	"github.com/onflow/flow-go/module/mempool/stdmap"
 	"github.com/onflow/flow-go/module/metrics"
 	mockmodule "github.com/onflow/flow-go/module/mock"
-	"github.com/onflow/flow-go/module/trace"
-	"github.com/onflow/flow-go/utils/fifoqueue"
+	"github.com/onflow/flow-go/network/mocknetwork"
+	mockprotocol "github.com/onflow/flow-go/state/protocol/mock"
+	mockstorage "github.com/onflow/flow-go/storage/mock"
 	"github.com/onflow/flow-go/utils/unittest"
 )
 
 func TestMatchingEngineContext(t *testing.T) {
-	suite.Run(t, new(EngineContextSuite))
+	suite.Run(t, new(MatchingEngineSuite))
 }
 
-type EngineContextSuite struct {
-	unittest.BaseChainSuite
-	// misc SERVICE COMPONENTS which are injected into Matching Core
-	requester         *mockmodule.Requester
-	receiptValidator  *mockmodule.ReceiptValidator
-	approvalValidator *mockmodule.ApprovalValidator
+type MatchingEngineSuite struct {
+	suite.Suite
 
-	// Context
-	context *Engine
+	index    *mockstorage.Index
+	receipts *mockstorage.ExecutionReceipts
+	core     *mockconsensus.MatchingCore
+	state    *mockprotocol.State
+
+	// Matching Engine
+	engine *Engine
 }
 
-func (ms *EngineContextSuite) SetupTest() {
-	// ~~~~~~~~~~~~~~~~~~~~~~~~~~ SETUP SUITE ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
-	ms.SetupChain()
-
-	log := zerolog.New(os.Stderr)
+func (s *MatchingEngineSuite) SetupTest() {
 	metrics := metrics.NewNoopCollector()
-	tracer := trace.NewNoopTracer()
+	me := &mockmodule.Local{}
+	net := &mockmodule.Network{}
+	s.core = &mockconsensus.MatchingCore{}
+	s.index = &mockstorage.Index{}
+	s.receipts = &mockstorage.ExecutionReceipts{}
+	s.state = &mockprotocol.State{}
 
-	// ~~~~~~~~~~~~~~~~~~~~~~~ SETUP MATCHING ENGINE ~~~~~~~~~~~~~~~~~~~~~~~ //
-	ms.requester = new(mockmodule.Requester)
-	ms.receiptValidator = &mockmodule.ReceiptValidator{}
-	ms.approvalValidator = &mockmodule.ApprovalValidator{}
+	ourNodeID := unittest.IdentifierFixture()
+	me.On("NodeID").Return(ourNodeID)
 
-	approvalsProvider := make(chan *Event)
-	approvalResponseProvider := make(chan *Event)
-	receiptsProvider := make(chan *Event)
+	con := &mocknetwork.Conduit{}
+	net.On("Register", mock.Anything, mock.Anything).Return(con, nil).Once()
 
-	ms.context = &Engine{
-		log:  log,
-		unit: engine.NewUnit(),
-		core: &Core{
-			tracer:                               tracer,
-			log:                                  log,
-			coreMetrics:                          metrics,
-			mempool:                              metrics,
-			metrics:                              metrics,
-			state:                                ms.State,
-			receiptRequester:                     ms.requester,
-			receiptsDB:                           ms.ReceiptsDB,
-			headersDB:                            ms.HeadersDB,
-			indexDB:                              ms.IndexDB,
-			incorporatedResults:                  ms.ResultsPL,
-			receipts:                             ms.ReceiptsPL,
-			approvals:                            ms.ApprovalsPL,
-			seals:                                ms.SealsPL,
-			pendingReceipts:                      stdmap.NewPendingReceipts(100),
-			sealingThreshold:                     10,
-			maxResultsToRequest:                  200,
-			assigner:                             ms.Assigner,
-			receiptValidator:                     ms.receiptValidator,
-			approvalValidator:                    ms.approvalValidator,
-			requestTracker:                       NewRequestTracker(1, 3),
-			approvalRequestsThreshold:            10,
-			requiredApprovalsForSealConstruction: DefaultRequiredApprovalsForSealConstruction,
-			emergencySealingActive:               false,
-		},
-		approvalSink:                         approvalsProvider,
-		requestedApprovalSink:                approvalResponseProvider,
-		receiptSink:                          receiptsProvider,
-		pendingEventSink:                     make(chan *Event),
-		engineMetrics:                        metrics,
-		cacheMetrics:                         metrics,
-		requiredApprovalsForSealConstruction: DefaultRequiredApprovalsForSealConstruction,
-	}
+	var err error
+	s.engine, err = NewEngine(unittest.Logger(), net, me, metrics, metrics, s.state, s.receipts, s.index, s.core)
+	require.NoError(s.T(), err)
 
-	ms.context.pendingReceipts, _ = fifoqueue.NewFifoQueue()
-	ms.context.pendingApprovals, _ = fifoqueue.NewFifoQueue()
-	ms.context.pendingRequestedApprovals, _ = fifoqueue.NewFifoQueue()
-
-	<-ms.context.Ready()
+	<-s.engine.Ready()
 }
 
-// TestProcessValidReceipt tests if valid receipt gets recorded into mempool when send through `Engine`.
+// TestOnFinalizedBlock tests if finalized block gets processed when send through `Engine`.
 // Tests the whole processing pipeline.
-func (ms *EngineContextSuite) TestProcessValidReceipt() {
-	originID := ms.ExeID
-	receipt := unittest.ExecutionReceiptFixture(
-		unittest.WithExecutorID(originID),
-		unittest.WithResult(unittest.ExecutionResultFixture(unittest.WithBlock(&ms.UnfinalizedBlock))),
-	)
+func (s *MatchingEngineSuite) TestOnFinalizedBlock() {
 
-	ms.receiptValidator.On("Validate", []*flow.ExecutionReceipt{receipt}).Return(nil).Once()
-
-	// we expect that receipt is added to mempool
-	ms.ReceiptsPL.On("AddReceipt", receipt, ms.UnfinalizedBlock.Header).Return(true, nil).Once()
-
-	// setup the results mempool to check if we attempted to add the incorporated result
-	ms.ResultsPL.
-		On("Add", incorporatedResult(receipt.ExecutionResult.BlockID, &receipt.ExecutionResult)).
-		Return(true, nil).Once()
-
-	err := ms.context.Process(originID, receipt)
-	ms.Require().NoError(err, "should add receipt and result to mempool if valid")
+	finalizedBlock := unittest.BlockHeaderFixture()
+	finalizedBlockID := finalizedBlock.ID()
+	s.state.On("Final").Return(unittest.StateSnapshotForKnownBlock(&finalizedBlock, nil))
+	s.core.On("OnBlockFinalization").Return(nil).Once()
+	s.engine.OnFinalizedBlock(finalizedBlockID)
 
 	// matching engine has at least 100ms ticks for processing events
 	time.Sleep(1 * time.Second)
 
-	ms.receiptValidator.AssertExpectations(ms.T())
-	ms.ReceiptsPL.AssertExpectations(ms.T())
-	ms.ResultsPL.AssertExpectations(ms.T())
+	s.core.AssertExpectations(s.T())
 }
 
-// TestProcessValidReceipt tests if valid receipt gets recorded into mempool when send through `Engine`.
+// TestOnBlockIncorporated tests if incorporated block gets processed when send through `Engine`.
 // Tests the whole processing pipeline.
-func (ms *EngineContextSuite) TestMultipleProcessingItems() {
-	originID := ms.ExeID
+func (s *MatchingEngineSuite) TestOnBlockIncorporated() {
+
+	incorporatedBlock := unittest.BlockHeaderFixture()
+	incorporatedBlockID := incorporatedBlock.ID()
+
+	payload := unittest.PayloadFixture(unittest.WithAllTheFixins)
+	index := &flow.Index{}
+	resultsByID := payload.Results.Lookup()
+	for _, receipt := range payload.Receipts {
+		index.ReceiptIDs = append(index.ReceiptIDs, receipt.ID())
+		fullReceipt := flow.ExecutionReceiptFromMeta(*receipt, *resultsByID[receipt.ResultID])
+		s.receipts.On("ByID", receipt.ID()).Return(fullReceipt, nil).Once()
+		s.core.On("ProcessReceipt", fullReceipt).Return(nil).Once()
+	}
+	s.index.On("ByBlockID", incorporatedBlockID).Return(index, nil)
+
+	s.engine.OnBlockIncorporated(incorporatedBlockID)
+
+	// matching engine has at least 100ms ticks for processing events
+	time.Sleep(1 * time.Second)
+
+	s.core.AssertExpectations(s.T())
+}
+
+// TestMultipleProcessingItems tests that the engine queues multiple receipts
+// and eventually feeds them into matching.Core for processing
+func (s *MatchingEngineSuite) TestMultipleProcessingItems() {
+	originID := unittest.IdentifierFixture()
+	block := unittest.BlockFixture()
 
 	receipts := make([]*flow.ExecutionReceipt, 20)
 	for i := range receipts {
 		receipt := unittest.ExecutionReceiptFixture(
 			unittest.WithExecutorID(originID),
-			unittest.WithResult(unittest.ExecutionResultFixture(unittest.WithBlock(&ms.UnfinalizedBlock))),
+			unittest.WithResult(unittest.ExecutionResultFixture(unittest.WithBlock(&block))),
 		)
-		ms.receiptValidator.On("Validate", []*flow.ExecutionReceipt{receipt}).Return(nil).Once()
-		// we expect that receipt is added to mempool
-		ms.ReceiptsPL.On("AddReceipt", receipt, ms.UnfinalizedBlock.Header).Return(true, nil).Once()
-		// setup the results mempool to check if we attempted to add the incorporated result
-		ms.ResultsPL.
-			On("Add", incorporatedResult(receipt.ExecutionResult.BlockID, &receipt.ExecutionResult)).
-			Return(true, nil).Once()
 		receipts[i] = receipt
-	}
-
-	numApprovalsPerReceipt := 1
-	approvals := make([]*flow.ResultApproval, 0, len(receipts)*numApprovalsPerReceipt)
-	approverID := ms.VerID
-	for _, receipt := range receipts {
-		for j := 0; j < numApprovalsPerReceipt; j++ {
-			approval := unittest.ResultApprovalFixture(unittest.WithExecutionResultID(receipt.ID()),
-				unittest.WithApproverID(approverID))
-			ms.approvalValidator.On("Validate", approval).Return(nil).Once()
-			approvals = append(approvals, approval)
-			ms.ApprovalsPL.
-				On("Add", approval).Return(true, nil).Once()
-		}
+		s.core.On("ProcessReceipt", receipt).Return(nil).Once()
 	}
 
 	var wg sync.WaitGroup
@@ -166,16 +121,8 @@ func (ms *EngineContextSuite) TestMultipleProcessingItems() {
 	go func() {
 		defer wg.Done()
 		for _, receipt := range receipts {
-			err := ms.context.Process(originID, receipt)
-			ms.Require().NoError(err, "should add receipt and result to mempool if valid")
-		}
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for _, approval := range approvals {
-			err := ms.context.Process(approverID, approval)
-			ms.Require().NoError(err, "should process approval")
+			err := s.engine.Process(engine.ReceiveReceipts, originID, receipt)
+			s.Require().NoError(err, "should add receipt and result to mempool if valid")
 		}
 	}()
 
@@ -184,8 +131,5 @@ func (ms *EngineContextSuite) TestMultipleProcessingItems() {
 	// matching engine has at least 100ms ticks for processing events
 	time.Sleep(1 * time.Second)
 
-	ms.receiptValidator.AssertExpectations(ms.T())
-	ms.ReceiptsPL.AssertExpectations(ms.T())
-	ms.ResultsPL.AssertExpectations(ms.T())
-	ms.ApprovalsPL.AssertExpectations(ms.T())
+	s.core.AssertExpectations(s.T())
 }

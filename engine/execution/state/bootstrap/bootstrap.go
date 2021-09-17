@@ -5,13 +5,12 @@ import (
 	"fmt"
 
 	"github.com/dgraph-io/badger/v2"
-	"github.com/onflow/cadence"
-	"github.com/onflow/cadence/runtime"
 	"github.com/rs/zerolog"
 
 	"github.com/onflow/flow-go/engine/execution/state"
 	"github.com/onflow/flow-go/engine/execution/state/delta"
 	"github.com/onflow/flow-go/fvm"
+	"github.com/onflow/flow-go/fvm/programs"
 	"github.com/onflow/flow-go/ledger"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/storage"
@@ -32,29 +31,30 @@ func NewBootstrapper(logger zerolog.Logger) *Bootstrapper {
 func (b *Bootstrapper) BootstrapLedger(
 	ledger ledger.Ledger,
 	servicePublicKey flow.AccountPublicKey,
-	initialTokenSupply cadence.UFix64,
 	chain flow.Chain,
+	opts ...fvm.BootstrapProcedureOption,
 ) (flow.StateCommitment, error) {
-	view := delta.NewView(state.LedgerGetRegister(ledger, ledger.InitialState()))
-	programs := fvm.NewEmptyPrograms()
+	view := delta.NewView(state.LedgerGetRegister(ledger, flow.StateCommitment(ledger.InitialState())))
+	programs := programs.NewEmptyPrograms()
 
-	vm := fvm.New(runtime.NewInterpreterRuntime())
+	rt := fvm.NewInterpreterRuntime()
+	vm := fvm.NewVirtualMachine(rt)
 
 	ctx := fvm.NewContext(b.logger, fvm.WithChain(chain))
 
 	bootstrap := fvm.Bootstrap(
 		servicePublicKey,
-		fvm.WithInitialTokenSupply(initialTokenSupply),
+		opts...,
 	)
 
 	err := vm.Run(ctx, bootstrap, view, programs)
 	if err != nil {
-		return nil, err
+		return flow.DummyStateCommitment, err
 	}
 
-	newStateCommitment, err := state.CommitDelta(ledger, view.Delta(), ledger.InitialState())
+	newStateCommitment, _, err := state.CommitDelta(ledger, view.Delta(), flow.StateCommitment(ledger.InitialState()))
 	if err != nil {
-		return nil, err
+		return flow.DummyStateCommitment, err
 	}
 
 	return newStateCommitment, nil
@@ -75,11 +75,11 @@ func (b *Bootstrapper) IsBootstrapped(db *badger.DB) (flow.StateCommitment, bool
 	})
 
 	if errors.Is(err, storage.ErrNotFound) {
-		return nil, false, nil
+		return flow.DummyStateCommitment, false, nil
 	}
 
 	if err != nil {
-		return nil, false, err
+		return flow.DummyStateCommitment, false, err
 	}
 
 	return commit, true, nil

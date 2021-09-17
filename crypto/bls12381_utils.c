@@ -18,10 +18,15 @@ int get_invalid() {
     return INVALID;
 }
 
+void bn_new_wrapper(bn_t a) {
+    bn_new(a);
+}
+
 // global variable of the pre-computed data
 prec_st bls_prec_st;
 prec_st* bls_prec = NULL;
 
+// required constants for the optimized SWU hash to curve
 #if (hashToPoint == OPSWU)
 extern const uint64_t p_3div4_data[Fp_DIGITS];
 extern const uint64_t fp_p_1div2_data[Fp_DIGITS];
@@ -45,8 +50,8 @@ const uint64_t p_1div2_data[Fp_DIGITS] = {
 
 
 // sets the global variable to input
-void precomputed_data_set(prec_st* p) {
-    bls_prec = p;
+void precomputed_data_set(const prec_st* p) {
+    bls_prec = (prec_st*)p;
 }
 
 // Reads a prime field element from a digit vector in big endian format.
@@ -58,9 +63,11 @@ prec_st* init_precomputed_data_BLS12_381() {
     bls_prec = &bls_prec_st;
 
     #if (hashToPoint == OPSWU)
+    // isogenous curve constants used in optimized SWU
     fp_read_raw(bls_prec->a1, a1_data);
     fp_read_raw(bls_prec->b1, b1_data);
     // (p-3)/4
+    bn_new(&bls_prec->p_3div4);
     bn_read_raw(&bls_prec->p_3div4, p_3div4_data, Fp_DIGITS);
     // (p-1)/2
     fp_read_raw(bls_prec->fp_p_1div2, fp_p_1div2_data);
@@ -75,10 +82,13 @@ prec_st* init_precomputed_data_BLS12_381() {
     #endif
 
     #if (MEMBERSHIP_CHECK_G1 == BOWE)
+    bn_new(&bls_prec->beta);
     bn_read_raw(&bls_prec->beta, beta_data, Fp_DIGITS);
+    bn_new(&bls_prec->z2_1_by3);
     bn_read_raw(&bls_prec->z2_1_by3, z2_1_by3_data, 2);
     #endif
 
+    bn_new(&bls_prec->p_1div2);
     bn_read_raw(&bls_prec->p_1div2, p_1div2_data, Fp_DIGITS);
     return bls_prec;
 }
@@ -222,7 +232,7 @@ void bn_map_to_Zr_star(bn_t a, const uint8_t* bin, int len) {
 
 // returns the sign of y.
 // 1 if y > (p - 1)/2 and 0 otherwise.
-static int fp_get_sign(fp_t y) {
+static int fp_get_sign(const fp_t y) {
     bn_t bn_y;
     bn_new(bn_y);
     fp_prime_back(bn_y, y);
@@ -234,10 +244,12 @@ static int fp_get_sign(fp_t y) {
 // The serialization is following:
 // https://www.ietf.org/archive/id/draft-irtf-cfrg-pairing-friendly-curves-08.html#name-zcash-serialization-format-) 
 // The code is a modified version of Relic ep_write_bin
+// It returns RLC_OK if the inputs are valid and the execution completes, RLC_ERR if any of
+// the inputs is invalid, and UNDEFINED if an unexpected execution error happens.
 void ep_write_bin_compact(byte *bin, const ep_t a, const int len) {
     ep_t t;
     ep_null(t);
-    const int G1_size = (G1_BYTES/(SERIALIZATION+1));
+    const int G1_size = (G1_BYTES/(G1_SERIALIZATION+1));
 
     if (len!=G1_size) {
         RLC_THROW(ERR_NO_BUFFER);
@@ -246,7 +258,7 @@ void ep_write_bin_compact(byte *bin, const ep_t a, const int len) {
  
     if (ep_is_infty(a)) {
             // set the infinity bit
-            bin[0] = (SERIALIZATION << 7) | 0x40;
+            bin[0] = (G1_SERIALIZATION << 7) | 0x40;
             memset(bin+1, 0, G1_size-1);
             return;
     }
@@ -256,7 +268,7 @@ void ep_write_bin_compact(byte *bin, const ep_t a, const int len) {
         ep_norm(t, a);
         fp_write_bin(bin, Fp_BYTES, t->x);
 
-        if (SERIALIZATION == COMPRESSED) {
+        if (G1_SERIALIZATION == COMPRESSED) {
             bin[0] |= (fp_get_sign(t->y) << 5);
         } else {
             fp_write_bin(bin + Fp_BYTES, Fp_BYTES, t->y);
@@ -265,7 +277,7 @@ void ep_write_bin_compact(byte *bin, const ep_t a, const int len) {
         RLC_THROW(ERR_CAUGHT);
     }
 
-    bin[0] |= (SERIALIZATION << 7);
+    bin[0] |= (G1_SERIALIZATION << 7);
     ep_free(t);
  }
 
@@ -275,13 +287,24 @@ void ep_write_bin_compact(byte *bin, const ep_t a, const int len) {
 // The serialization is following:
 // https://www.ietf.org/archive/id/draft-irtf-cfrg-pairing-friendly-curves-08.html#name-zcash-serialization-format-) 
 // The code is a modified version of Relic ep_read_bin
+// It returns RLC_OK if the inputs are valid and the execution completes, RLC_ERR if any of
+// the inputs is invalid, and UNDEFINED if an unexpected execution error happens.
 int ep_read_bin_compact(ep_t a, const byte *bin, const int len) {
-    const int G1_size = (G1_BYTES/(SERIALIZATION+1));
+    // check the length
+    const int G1_size = (G1_BYTES/(G1_SERIALIZATION+1));
     if (len!=G1_size) {
         return RLC_ERR;
     }
+
+    // check the compression bit
+    int compressed = bin[0] >> 7;
+    if ((compressed == 1) != (G1_SERIALIZATION == COMPRESSED)) {
+        return RLC_ERR;
+    } 
+
     // check if the point is infinity
-    if (bin[0] & 0x40) {
+    int is_infinity = bin[0] & 0x40;
+    if (is_infinity) {
         // check if the remaining bits are cleared
         if (bin[0] & 0x3F) {
             return RLC_ERR;
@@ -295,9 +318,8 @@ int ep_read_bin_compact(ep_t a, const byte *bin, const int len) {
 		return RLC_OK;
 	} 
 
-    int compressed = bin[0] >> 7;
+    // read the sign bit and check for consistency
     int y_sign = (bin[0] >> 5) & 1;
-
     if (y_sign && (!compressed)) {
         return RLC_ERR;
     } 
@@ -307,14 +329,14 @@ int ep_read_bin_compact(ep_t a, const byte *bin, const int len) {
     byte* temp = (byte*)malloc(Fp_BYTES);
     if (!temp) {
         RLC_THROW(ERR_NO_MEMORY);
-        return RLC_ERR;
+        return UNDEFINED;
     }
     memcpy(temp, bin, Fp_BYTES);
     temp[0] &= 0x1F;
 	fp_read_bin(a->x, temp, Fp_BYTES);
     free(temp);
 
-    if (SERIALIZATION == UNCOMPRESSED) {
+    if (G1_SERIALIZATION == UNCOMPRESSED) {
         fp_read_bin(a->y, bin + Fp_BYTES, Fp_BYTES);
         return RLC_OK;
     }
@@ -325,6 +347,7 @@ int ep_read_bin_compact(ep_t a, const byte *bin, const int len) {
     }
     return RLC_ERR;
 }
+
 
 // returns the sign of y.
 // sign(y_0) if y_1 = 0, else sign(y_1)
@@ -343,7 +366,7 @@ static int fp2_get_sign(fp2_t y) {
 void ep2_write_bin_compact(byte *bin, const ep2_t a, const int len) {
     ep2_t t;
     ep2_null(t);
-    const int G2_size = (G2_BYTES/(SERIALIZATION+1));
+    const int G2_size = (G2_BYTES/(G2_SERIALIZATION+1));
 
     if (len!=G2_size) {
         RLC_THROW(ERR_NO_BUFFER);
@@ -352,7 +375,7 @@ void ep2_write_bin_compact(byte *bin, const ep2_t a, const int len) {
  
     if (ep2_is_infty((ep2_st *)a)) {
             // set the infinity bit
-            bin[0] = (SERIALIZATION << 7) | 0x40;
+            bin[0] = (G2_SERIALIZATION << 7) | 0x40;
             memset(bin+1, 0, G2_size-1);
             return;
     }
@@ -362,7 +385,7 @@ void ep2_write_bin_compact(byte *bin, const ep2_t a, const int len) {
         ep2_norm(t, (ep2_st *)a);
         fp2_write_bin(bin, 2*Fp_BYTES, t->x, 0);
 
-        if (SERIALIZATION == COMPRESSED) {
+        if (G2_SERIALIZATION == COMPRESSED) {
             bin[0] |= (fp2_get_sign(t->y) << 5);
         } else {
             fp2_write_bin(bin + 2*Fp_BYTES, 2*Fp_BYTES, t->y, 0);
@@ -371,20 +394,30 @@ void ep2_write_bin_compact(byte *bin, const ep2_t a, const int len) {
         RLC_THROW(ERR_CAUGHT);
     }
 
-    bin[0] |= (SERIALIZATION << 7);
+    bin[0] |= (G2_SERIALIZATION << 7);
     ep_free(t);
 }
 
 // ep2_read_bin_compact imports a point from a buffer in a compressed or uncompressed form.
+// It returns RLC_OK if the inputs are valid and the execution completes, RLC_ERR if any of
+// the inputs is invalid, and UNDEFINED if an unexpected execution error happens.
 // The code is a modified version of Relic ep2_read_bin
 int ep2_read_bin_compact(ep2_t a, const byte *bin, const int len) {
-    const int G2size = (G2_BYTES/(SERIALIZATION+1));
+    // check the length
+    const int G2size = (G2_BYTES/(G2_SERIALIZATION+1));
     if (len!=G2size) {
         return RLC_ERR;
     }
 
+    // check the compression bit
+    int compressed = bin[0] >> 7;
+    if ((compressed == 1) != (G2_SERIALIZATION == COMPRESSED)) {
+        return RLC_ERR;
+    } 
+
     // check if the point in infinity
-    if (bin[0] & 0x40) {
+    int is_infinity = bin[0] & 0x40;
+    if (is_infinity) {
         // the remaining bits need to be cleared
         if (bin[0] & 0x3F) {
             return RLC_ERR;
@@ -397,18 +430,20 @@ int ep2_read_bin_compact(ep2_t a, const byte *bin, const int len) {
 		ep2_set_infty(a);
 		return RLC_OK;
 	} 
-    byte compressed = bin[0] >> 7;
-    byte y_sign = (bin[0] >> 5) & 1;
+
+    // read the sign bit and check for consistency
+    int y_sign = (bin[0] >> 5) & 1;
     if (y_sign && (!compressed)) {
         return RLC_ERR;
     } 
+    
 	a->coord = BASIC;
 	fp_set_dig(a->z[0], 1);
 	fp_zero(a->z[1]);
     byte* temp = (byte*)malloc(2*Fp_BYTES);
     if (!temp) {
         RLC_THROW(ERR_NO_MEMORY);
-        return RLC_ERR;
+        return UNDEFINED;
     }
     memcpy(temp, bin, 2*Fp_BYTES);
     // clear the header bits
@@ -416,7 +451,7 @@ int ep2_read_bin_compact(ep2_t a, const byte *bin, const int len) {
     fp2_read_bin(a->x, temp, 2*Fp_BYTES);
     free(temp);
 
-    if (SERIALIZATION == UNCOMPRESSED) {
+    if (G2_SERIALIZATION == UNCOMPRESSED) {
         fp2_read_bin(a->y, bin + 2*Fp_BYTES, 2*Fp_BYTES);
         return RLC_OK;
     }
@@ -484,8 +519,9 @@ int bls_spock_verify(const ep2_t pk1, const byte* sig1, const ep2_t pk2, const b
 
     // elemsG1[0] = s1
     ep_new(elemsG1[0]);
-    if (ep_read_bin_compact(elemsG1[0], sig1, SIGNATURE_LEN) != RLC_OK) 
-        return INVALID;
+    int read_ret = ep_read_bin_compact(elemsG1[0], sig1, SIGNATURE_LEN);
+    if (read_ret != RLC_OK) 
+        return read_ret;
 
     // check s1 is on curve and in G1
     if (check_membership_G1(elemsG1[0]) != VALID) // only enabled if MEMBERSHIP_CHECK==1
@@ -493,8 +529,9 @@ int bls_spock_verify(const ep2_t pk1, const byte* sig1, const ep2_t pk2, const b
 
     // elemsG1[1] = s2
     ep_new(elemsG1[1]);
-    if (ep_read_bin_compact(elemsG1[1], sig2, SIGNATURE_LEN) != RLC_OK) 
-        return INVALID;
+    read_ret = ep_read_bin_compact(elemsG1[1], sig2, SIGNATURE_LEN);
+    if (read_ret != RLC_OK) 
+        return read_ret;
 
     // check s2 is on curve and in G1
     if (check_membership_G1(elemsG1[1]) != VALID) // only enabled if MEMBERSHIP_CHECK==1
@@ -556,8 +593,8 @@ void ep_sum_vector(ep_t jointx, ep_st* x, const int len) {
     }
 }
 
-// Computes the sum of the signatures (G1 elements) flattened in an single sigs array
-// and store the sum bytes in dest
+// Computes the sum of the signatures (G1 elements) flattened in a single sigs array
+// and store the sum bytes in dest.
 // The function assumes sigs is correctly allocated with regards to len.
 int ep_sum_vector_byte(byte* dest, const byte* sigs_bytes, const int len) {
     // temp variables
@@ -570,8 +607,9 @@ int ep_sum_vector_byte(byte* dest, const byte* sigs_bytes, const int len) {
     for (int i=0; i < len; i++) {
         ep_new(sigs[i]);
         // deserialize each point from the input array
-        if (ep_read_bin_compact(&sigs[i], &sigs_bytes[SIGNATURE_LEN*i], SIGNATURE_LEN) != RLC_OK)
-            return INVALID;
+        int read_ret = ep_read_bin_compact(&sigs[i], &sigs_bytes[SIGNATURE_LEN*i], SIGNATURE_LEN);
+        if (read_ret != RLC_OK)
+            return read_ret;
     }
     // sum the points
     ep_sum_vector(acc, sigs, len);
@@ -735,4 +773,10 @@ int subgroup_check_G1_bench() {
     res = bowe_subgroup_check_G1(p);
     #endif
     return res;
+}
+
+// This is a testing function.
+// It wraps a call to a Relic macro since cgo can't call macros.
+void xmd_sha256(uint8_t *hash, int len_hash, uint8_t *msg, int len_msg, uint8_t *dst, int len_dst){
+    md_xmd_sh256(hash, len_hash, msg, len_msg, dst, len_dst);
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/dgraph-io/badger/v2"
 
 	"github.com/onflow/flow-go/engine/execution/state/delta"
@@ -15,6 +16,7 @@ import (
 	"github.com/onflow/flow-go/module/mempool/entity"
 	"github.com/onflow/flow-go/module/trace"
 	"github.com/onflow/flow-go/storage"
+	badgerstorage "github.com/onflow/flow-go/storage/badger"
 	"github.com/onflow/flow-go/storage/badger/operation"
 )
 
@@ -52,24 +54,6 @@ type ReadOnlyExecutionState interface {
 	GetBlockIDByChunkID(chunkID flow.Identifier) (flow.Identifier, error)
 }
 
-// IsBlockExecuted returns whether the block has been executed.
-// it checks whether the state commitment exists in execution state.
-func IsBlockExecuted(ctx context.Context, state ReadOnlyExecutionState, block flow.Identifier) (bool, error) {
-	_, err := state.StateCommitmentByBlockID(ctx, block)
-
-	// statecommitment exists means the block has been executed
-	if err == nil {
-		return true, nil
-	}
-
-	// statecommitment not exists means the block hasn't been executed yet
-	if errors.Is(err, storage.ErrNotFound) {
-		return false, nil
-	}
-
-	return false, err
-}
-
 // TODO Many operations here are should be transactional, so we need to refactor this
 // to store a reference to DB and compose operations and procedures rather then
 // just being amalgamate of proxies for single transactions operation
@@ -78,12 +62,11 @@ func IsBlockExecuted(ctx context.Context, state ReadOnlyExecutionState, block fl
 type ExecutionState interface {
 	ReadOnlyExecutionState
 
-	// CommitDelta commits a register delta and returns the new state commitment.
-	CommitDelta(context.Context, delta.Delta, flow.StateCommitment) (flow.StateCommitment, error)
-
 	UpdateHighestExecutedBlockIfHigher(context.Context, *flow.Header) error
 
-	PersistExecutionState(ctx context.Context, header *flow.Header, endState flow.StateCommitment, chunkDataPacks []*flow.ChunkDataPack, executionResult *flow.ExecutionResult, events []flow.Event, serviceEvents []flow.Event, results []flow.TransactionResult) error
+	PersistExecutionState(ctx context.Context, header *flow.Header, endState flow.StateCommitment,
+		chunkDataPacks []*flow.ChunkDataPack,
+		executionReceipt *flow.ExecutionReceipt, events []flow.EventsList, serviceEvents flow.EventsList, results []flow.TransactionResult) error
 }
 
 const (
@@ -107,20 +90,6 @@ type state struct {
 	serviceEvents      storage.ServiceEvents
 	transactionResults storage.TransactionResults
 	db                 *badger.DB
-}
-
-func (s *state) PersistExecutionResult(ctx context.Context, executionResult *flow.ExecutionResult) error {
-
-	err := s.results.Store(executionResult)
-	if err != nil {
-		return fmt.Errorf("could not store result: %w", err)
-	}
-
-	err = s.results.Index(executionResult.BlockID, executionResult.ID())
-	if err != nil {
-		return fmt.Errorf("could not index execution result: %w", err)
-	}
-	return nil
 }
 
 func RegisterIDToKey(reg flow.RegisterID) ledger.Key {
@@ -168,7 +137,7 @@ func NewExecutionState(
 }
 
 func makeSingleValueQuery(commitment flow.StateCommitment, owner, controller, key string) (*ledger.Query, error) {
-	return ledger.NewQuery(commitment,
+	return ledger.NewQuery(ledger.State(commitment),
 		[]ledger.Key{
 			RegisterIDToKey(flow.NewRegisterID(owner, controller, key)),
 		})
@@ -181,7 +150,7 @@ func makeQuery(commitment flow.StateCommitment, ids []flow.RegisterID) (*ledger.
 		keys[i] = RegisterIDToKey(id)
 	}
 
-	return ledger.NewQuery(commitment, keys)
+	return ledger.NewQuery(ledger.State(commitment), keys)
 }
 
 func RegisterIDSToKeys(ids []flow.RegisterID) []ledger.Key {
@@ -201,7 +170,19 @@ func RegisterValuesToValues(values []flow.RegisterValue) []ledger.Value {
 }
 
 func LedgerGetRegister(ldg ledger.Ledger, commitment flow.StateCommitment) delta.GetRegisterFunc {
+
+	readCache := make(map[flow.RegisterID]flow.RegisterEntry)
+
 	return func(owner, controller, key string) (flow.RegisterValue, error) {
+		regID := flow.RegisterID{
+			Owner:      owner,
+			Controller: controller,
+			Key:        key,
+		}
+
+		if value, ok := readCache[regID]; ok {
+			return value.Value, nil
+		}
 
 		query, err := makeSingleValueQuery(commitment, owner, controller, key)
 
@@ -219,6 +200,9 @@ func LedgerGetRegister(ldg ledger.Ledger, commitment flow.StateCommitment) delta
 			return nil, nil
 		}
 
+		// don't cache value with len zero
+		readCache[regID] = flow.RegisterEntry{Key: regID, Value: values[0]}
+
 		return values[0], nil
 	}
 }
@@ -227,35 +211,37 @@ func (s *state) NewView(commitment flow.StateCommitment) *delta.View {
 	return delta.NewView(LedgerGetRegister(s.ls, commitment))
 }
 
-func CommitDelta(ldg ledger.Ledger, delta delta.Delta, baseState flow.StateCommitment) (flow.StateCommitment, error) {
-	ids, values := delta.RegisterUpdates()
+type RegisterUpdatesHolder interface {
+	RegisterUpdates() ([]flow.RegisterID, []flow.RegisterValue)
+}
+
+func CommitDelta(ldg ledger.Ledger, ruh RegisterUpdatesHolder, baseState flow.StateCommitment) (flow.StateCommitment, *ledger.TrieUpdate, error) {
+	ids, values := ruh.RegisterUpdates()
 
 	update, err := ledger.NewUpdate(
-		baseState,
+		ledger.State(baseState),
 		RegisterIDSToKeys(ids),
 		RegisterValuesToValues(values),
 	)
 
 	if err != nil {
-		return nil, fmt.Errorf("cannot create ledger update: %w", err)
+		return flow.DummyStateCommitment, nil, fmt.Errorf("cannot create ledger update: %w", err)
 	}
 
-	commit, err := ldg.Set(update)
+	commit, trieUpdate, err := ldg.Set(update)
 	if err != nil {
-		return nil, err
+		return flow.DummyStateCommitment, nil, err
 	}
 
-	return commit, nil
+	return flow.StateCommitment(commit), trieUpdate, nil
 }
 
-func (s *state) CommitDelta(ctx context.Context, delta delta.Delta, baseState flow.StateCommitment) (flow.StateCommitment, error) {
-	if s.tracer != nil {
-		span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXECommitDelta)
-		defer span.Finish()
-	}
-
-	return CommitDelta(s.ls, delta, baseState)
-}
+//func (s *state) CommitDelta(ctx context.Context, delta delta.Delta, baseState flow.StateCommitment) (flow.StateCommitment, error) {
+//	span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXECommitDelta)
+//	defer span.Finish()
+//
+//	return CommitDelta(s.ls, delta, baseState)
+//}
 
 func (s *state) getRegisters(commit flow.StateCommitment, registerIDs []flow.RegisterID) (*ledger.Query, []ledger.Value, error) {
 
@@ -278,10 +264,8 @@ func (s *state) GetRegisters(
 	commit flow.StateCommitment,
 	registerIDs []flow.RegisterID,
 ) ([]flow.RegisterValue, error) {
-	if s.tracer != nil {
-		span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEGetRegisters)
-		defer span.Finish()
-	}
+	span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEGetRegisters)
+	defer span.Finish()
 
 	_, values, err := s.getRegisters(commit, registerIDs)
 	if err != nil {
@@ -302,12 +286,16 @@ func (s *state) GetProof(
 	registerIDs []flow.RegisterID,
 ) (flow.StorageProof, error) {
 
+	span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEGetRegistersWithProofs)
+	defer span.Finish()
+
 	query, err := makeQuery(commit, registerIDs)
 
 	if err != nil {
 		return nil, fmt.Errorf("cannot create ledger query: %w", err)
 	}
 
+	// Get proofs in an arbitrary order, not correlated to the register ID order in the query.
 	proof, err := s.ls.Prove(query)
 	if err != nil {
 		return nil, fmt.Errorf("cannot get proof: %w", err)
@@ -319,27 +307,18 @@ func (s *state) StateCommitmentByBlockID(ctx context.Context, blockID flow.Ident
 	return s.commits.ByBlockID(blockID)
 }
 
-func (s *state) PersistStateCommitment(ctx context.Context, blockID flow.Identifier, commit flow.StateCommitment) error {
-	if s.tracer != nil {
-		span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEPersistStateCommitment)
-		defer span.Finish()
+func (s *state) ChunkDataPackByChunkID(ctx context.Context, chunkID flow.Identifier) (*flow.ChunkDataPack, error) {
+	chunkDataPack, err := s.chunkDataPacks.ByChunkID(chunkID)
+	if err != nil {
+		return nil, fmt.Errorf("could not retrieve stored chunk data pack: %w", err)
 	}
 
-	return s.commits.Store(blockID, commit)
-}
-
-func (s *state) ChunkDataPackByChunkID(ctx context.Context, chunkID flow.Identifier) (*flow.ChunkDataPack, error) {
-	span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEPersistStateCommitment)
-	defer span.Finish()
-
-	return s.chunkDataPacks.ByChunkID(chunkID)
+	return chunkDataPack, nil
 }
 
 func (s *state) GetExecutionResultID(ctx context.Context, blockID flow.Identifier) (flow.Identifier, error) {
-	if s.tracer != nil {
-		span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEGetExecutionResultID)
-		defer span.Finish()
-	}
+	span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEGetExecutionResultID)
+	defer span.Finish()
 
 	result, err := s.results.ByBlockID(blockID)
 	if err != nil {
@@ -348,29 +327,12 @@ func (s *state) GetExecutionResultID(ctx context.Context, blockID flow.Identifie
 	return result.ID(), nil
 }
 
-func (s *state) PersistExecutionReceipt(ctx context.Context, receipt *flow.ExecutionReceipt) error {
-	if s.tracer != nil {
-		span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEPersistExecutionResult)
-		defer span.Finish()
-	}
+func (s *state) PersistExecutionState(ctx context.Context, header *flow.Header, endState flow.StateCommitment,
+	chunkDataPacks []*flow.ChunkDataPack, executionReceipt *flow.ExecutionReceipt, events []flow.EventsList, serviceEvents flow.EventsList,
+	results []flow.TransactionResult) error {
 
-	err := s.myReceipts.StoreMyReceipt(receipt)
-	if err != nil {
-		return fmt.Errorf("could not persist execution result: %w", err)
-	}
-	return nil
-}
-
-func (s *state) PersistStateInteractions(ctx context.Context, blockID flow.Identifier, views []*delta.Snapshot) error {
-	if s.tracer != nil {
-		span, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEPersistStateInteractions)
-		defer span.Finish()
-	}
-
-	return operation.RetryOnConflict(s.db.Update, operation.InsertExecutionStateInteractions(blockID, views))
-}
-
-func (s *state) PersistExecutionState(ctx context.Context, header *flow.Header, endState flow.StateCommitment, chunkDataPacks []*flow.ChunkDataPack, executionResult *flow.ExecutionResult, events []flow.Event, serviceEvents []flow.Event, results []flow.TransactionResult) error {
+	spew.Config.DisableMethods = true
+	spew.Config.DisablePointerMethods = true
 
 	span, childCtx := s.tracer.StartSpanFromContext(ctx, trace.EXESaveExecutionResults)
 	defer span.Finish()
@@ -382,8 +344,9 @@ func (s *state) PersistExecutionState(ctx context.Context, header *flow.Header, 
 	// as tightly as possible to let Badger manage it.
 	// Note, that it does not guarantee atomicity as transactions has size limit
 	// but it's the closes thing to atomicity we could have
-	batch := s.db.NewWriteBatch()
+	batch := badgerstorage.NewBatch(s.db)
 
+	sp, _ := s.tracer.StartSpanFromContext(ctx, trace.EXEPersistChunkDataPack)
 	for _, chunkDataPack := range chunkDataPacks {
 		err := s.chunkDataPacks.BatchStore(chunkDataPack, batch)
 		if err != nil {
@@ -395,21 +358,30 @@ func (s *state) PersistExecutionState(ctx context.Context, header *flow.Header, 
 			return fmt.Errorf("cannot index chunk data pack by blockID: %w", err)
 		}
 	}
+	sp.Finish()
 
+	sp, _ = s.tracer.StartSpanFromContext(ctx, trace.EXEPersistStateCommitment)
 	err := s.commits.BatchStore(blockID, endState, batch)
 	if err != nil {
 		return fmt.Errorf("cannot store state commitment: %w", err)
 	}
+	sp.Finish()
+
+	sp, _ = s.tracer.StartSpanFromContext(ctx, trace.EXEPersistEvents)
 
 	err = s.events.BatchStore(blockID, events, batch)
+
 	if err != nil {
 		return fmt.Errorf("cannot store events: %w", err)
 	}
 
-	err = s.serviceEvents.BatchStore(blockID, events, batch)
+	err = s.serviceEvents.BatchStore(blockID, serviceEvents, batch)
 	if err != nil {
 		return fmt.Errorf("cannot store service events: %w", err)
 	}
+	sp.Finish()
+
+	executionResult := &executionReceipt.ExecutionResult
 
 	err = s.transactionResults.BatchStore(blockID, results, batch)
 	if err != nil {
@@ -425,6 +397,11 @@ func (s *state) PersistExecutionState(ctx context.Context, header *flow.Header, 
 	err = s.results.BatchIndex(blockID, executionResult.ID(), batch)
 	if err != nil {
 		return fmt.Errorf("cannot index execution result: %w", err)
+	}
+
+	err = s.myReceipts.BatchStoreMyReceipt(executionReceipt, batch)
+	if err != nil {
+		return fmt.Errorf("could not persist execution result: %w", err)
 	}
 
 	err = batch.Flush()
@@ -506,7 +483,7 @@ func (s *state) RetrieveStateDelta(ctx context.Context, blockID flow.Identifier)
 	return &messages.ExecutionStateDelta{
 		ExecutableBlock: entity.ExecutableBlock{
 			Block:               block,
-			StartState:          startStateCommitment,
+			StartState:          &startStateCommitment,
 			CompleteCollections: completeCollections,
 		},
 		StateInteractions:  stateInteractions,
@@ -575,4 +552,22 @@ func (s *state) GetHighestExecutedBlockID(ctx context.Context) (uint64, flow.Ide
 	}
 
 	return highest.Height, blockID, nil
+}
+
+// IsBlockExecuted returns whether the block has been executed.
+// it checks whether the state commitment exists in execution state.
+func IsBlockExecuted(ctx context.Context, state ReadOnlyExecutionState, block flow.Identifier) (bool, error) {
+	_, err := state.StateCommitmentByBlockID(ctx, block)
+
+	// statecommitment exists means the block has been executed
+	if err == nil {
+		return true, nil
+	}
+
+	// statecommitment not exists means the block hasn't been executed yet
+	if errors.Is(err, storage.ErrNotFound) {
+		return false, nil
+	}
+
+	return false, err
 }

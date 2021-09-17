@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -29,15 +30,18 @@ type ProviderEngine interface {
 // An Engine provides means of accessing data about execution state and broadcasts execution receipts to nodes in the network.
 // Also generates and saves execution receipts
 type Engine struct {
-	unit          *engine.Unit
-	log           zerolog.Logger
-	tracer        module.Tracer
-	receiptCon    network.Conduit
-	state         protocol.State
-	execState     state.ReadOnlyExecutionState
-	me            module.Local
-	chunksConduit network.Conduit
-	metrics       module.ExecutionMetrics
+	unit                *engine.Unit
+	log                 zerolog.Logger
+	tracer              module.Tracer
+	receiptCon          network.Conduit
+	state               protocol.State
+	execState           state.ReadOnlyExecutionState
+	me                  module.Local
+	chunksConduit       network.Conduit
+	metrics             module.ExecutionMetrics
+	checkStakedAtBlock  func(blockID flow.Identifier) (bool, error)
+	chdpQueryTimeout    time.Duration
+	chdpDeliveryTimeout time.Duration
 }
 
 func New(
@@ -48,18 +52,24 @@ func New(
 	me module.Local,
 	execState state.ReadOnlyExecutionState,
 	metrics module.ExecutionMetrics,
+	checkStakedAtBlock func(blockID flow.Identifier) (bool, error),
+	chdpQueryTimeout uint,
+	chdpDeliveryTimeout uint,
 ) (*Engine, error) {
 
 	log := logger.With().Str("engine", "receipts").Logger()
 
 	eng := Engine{
-		unit:      engine.NewUnit(),
-		log:       log,
-		tracer:    tracer,
-		state:     state,
-		me:        me,
-		execState: execState,
-		metrics:   metrics,
+		unit:                engine.NewUnit(),
+		log:                 log,
+		tracer:              tracer,
+		state:               state,
+		me:                  me,
+		execState:           execState,
+		metrics:             metrics,
+		checkStakedAtBlock:  checkStakedAtBlock,
+		chdpQueryTimeout:    time.Duration(chdpQueryTimeout) * time.Second,
+		chdpDeliveryTimeout: time.Duration(chdpDeliveryTimeout) * time.Second,
 	}
 
 	var err error
@@ -79,12 +89,17 @@ func New(
 }
 
 func (e *Engine) SubmitLocal(event interface{}) {
-	e.Submit(e.me.NodeID(), event)
+	e.unit.Launch(func() {
+		err := e.ProcessLocal(event)
+		if err != nil {
+			engine.LogError(e.log, err)
+		}
+	})
 }
 
-func (e *Engine) Submit(originID flow.Identifier, event interface{}) {
+func (e *Engine) Submit(channel network.Channel, originID flow.Identifier, event interface{}) {
 	e.unit.Launch(func() {
-		err := e.Process(originID, event)
+		err := e.Process(channel, originID, event)
 		if err != nil {
 			engine.LogError(e.log, err)
 		}
@@ -92,7 +107,9 @@ func (e *Engine) Submit(originID flow.Identifier, event interface{}) {
 }
 
 func (e *Engine) ProcessLocal(event interface{}) error {
-	return e.Process(e.me.NodeID(), event)
+	return e.unit.Do(func() error {
+		return e.process(e.me.NodeID(), event)
+	})
 }
 
 // Ready returns a channel that will close when the engine has
@@ -107,7 +124,7 @@ func (e *Engine) Done() <-chan struct{} {
 	return e.unit.Done()
 }
 
-func (e *Engine) Process(originID flow.Identifier, event interface{}) error {
+func (e *Engine) Process(channel network.Channel, originID flow.Identifier, event interface{}) error {
 	return e.unit.Do(func() error {
 		return e.process(originID, event)
 	})
@@ -117,14 +134,12 @@ func (e *Engine) process(originID flow.Identifier, event interface{}) error {
 	ctx := context.Background()
 	switch v := event.(type) {
 	case *messages.ChunkDataRequest:
-		err := e.onChunkDataRequest(ctx, originID, v)
-		if err != nil {
-			return fmt.Errorf("could not answer chunk data request: %w", err)
-		}
-		return err
+		e.onChunkDataRequest(ctx, originID, v)
 	default:
 		return fmt.Errorf("invalid event type (%T)", event)
 	}
+
+	return nil
 }
 
 // onChunkDataRequest receives a request for the chunk data pack associated with chunkID from the
@@ -134,71 +149,106 @@ func (e *Engine) onChunkDataRequest(
 	ctx context.Context,
 	originID flow.Identifier,
 	req *messages.ChunkDataRequest,
-) error {
+) {
+
+	processStart := time.Now()
 
 	// extracts list of verifier nodes id
 	chunkID := req.ChunkID
 
-	log := e.log.With().
+	lg := e.log.With().
 		Hex("origin_id", logging.ID(originID)).
 		Hex("chunk_id", logging.ID(chunkID)).
 		Logger()
 
-	log.Debug().Msg("received chunk data pack request")
+	lg.Info().Msg("received chunk data pack request")
 
 	// increases collector metric
 	e.metrics.ChunkDataPackRequested()
 
-	cdp, err := e.execState.ChunkDataPackByChunkID(ctx, chunkID)
+	chunkDataPack, err := e.execState.ChunkDataPackByChunkID(ctx, chunkID)
 	// we might be behind when we don't have the requested chunk.
 	// if this happen, log it and return nil
 	if errors.Is(err, storage.ErrNotFound) {
-		log.Warn().Msg("chunk not found")
-		return nil
+		lg.Warn().
+			Err(err).
+			Msg("chunk data pack not found, execution node may be behind")
+		return
 	}
-
 	if err != nil {
-		return fmt.Errorf("could not retrieve chunk ID (%s): %w", originID, err)
+		lg.Error().
+			Err(err).
+			Msg("could not retrieve chunk ID from storage")
+		return
 	}
 
-	origin, err := e.ensureStaked(cdp.ChunkID, originID)
+	_, err = e.ensureStaked(chunkDataPack.ChunkID, originID)
 	if err != nil {
-		return err
-	}
-
-	var collection flow.Collection
-	if cdp.CollectionID != flow.ZeroID {
-		// retrieves collection of non-zero chunks
-		coll, err := e.execState.GetCollection(cdp.CollectionID)
-		if err != nil {
-			return fmt.Errorf("cannot retrieve collection %x for chunk %x: %w", cdp.CollectionID, cdp.ChunkID, err)
-		}
-		collection = *coll
+		lg.Error().
+			Err(err).
+			Msg("could not verify staked identity of chunk data pack request, dropping it")
+		return
 	}
 
 	response := &messages.ChunkDataResponse{
-		ChunkDataPack: *cdp,
+		ChunkDataPack: *chunkDataPack,
 		Nonce:         rand.Uint64(),
-		Collection:    collection,
 	}
+
+	sinceProcess := time.Since(processStart)
+	lg = lg.With().Dur("sinceProcess", sinceProcess).Logger()
+
+	if sinceProcess > e.chdpQueryTimeout {
+		lg.Warn().Msgf("chunk data pack query takes longer than %v secs", e.chdpQueryTimeout.Seconds())
+	}
+
+	lg.Debug().Msg("chunk data pack response lunched to dispatch")
 
 	// sends requested chunk data pack to the requester
-	err = e.chunksConduit.Unicast(response, originID)
-	if err != nil {
-		return fmt.Errorf("could not send requested chunk data pack to (%s): %w", origin, err)
-	}
+	e.unit.Launch(func() {
+		deliveryStart := time.Now()
 
-	log.Debug().
-		Hex("collection_id", logging.ID(response.Collection.ID())).
-		Msg("chunk data pack request successfully replied")
+		err := e.chunksConduit.Unicast(response, originID)
 
-	return nil
+		sinceDeliver := time.Since(deliveryStart)
+		lg = lg.With().Dur("since_deliver", sinceDeliver).Logger()
+
+		if sinceDeliver > e.chdpDeliveryTimeout {
+			lg.Warn().Msgf("chunk data pack response delivery takes longer than %v secs", e.chdpDeliveryTimeout.Seconds())
+		}
+
+		if err != nil {
+			lg.Warn().
+				Err(err).
+				Msg("could not send requested chunk data pack to origin ID")
+			return
+		}
+
+		if response.ChunkDataPack.Collection != nil {
+			// logging collection id of non-system chunks.
+			// A system chunk has both the collection and collection id set to nil.
+			lg = lg.With().
+				Hex("collection_id", logging.ID(response.ChunkDataPack.Collection.ID())).
+				Logger()
+		}
+
+		lg.Info().Msg("chunk data pack request successfully replied")
+	})
 }
 
 func (e *Engine) ensureStaked(chunkID flow.Identifier, originID flow.Identifier) (*flow.Identity, error) {
+
 	blockID, err := e.execState.GetBlockIDByChunkID(chunkID)
 	if err != nil {
 		return nil, engine.NewInvalidInputErrorf("cannot find blockID corresponding to chunk data pack: %w", err)
+	}
+
+	stakedAt, err := e.checkStakedAtBlock(blockID)
+	if err != nil {
+		return nil, engine.NewInvalidInputErrorf("cannot check block staking status: %w", err)
+	}
+	if !stakedAt {
+		return nil, engine.NewInvalidInputErrorf("this node is not staked at the block (%s) corresponding to chunk data pack (%s)", blockID.String(), chunkID.String())
 	}
 
 	origin, err := e.state.AtBlockID(blockID).Identity(originID)
@@ -212,15 +262,15 @@ func (e *Engine) ensureStaked(chunkID flow.Identifier, originID flow.Identifier)
 	}
 
 	if origin.Stake == 0 {
-		return nil, engine.NewInvalidInputErrorf("node %s is not staked for the epoch corresponding to the requested chunk data pack", origin.NodeID)
+		return nil, engine.NewInvalidInputErrorf("node %s is not staked at the block (%s) corresponding to chunk data pack (%s)", originID, blockID.String(), chunkID.String())
 	}
 	return origin, nil
 }
 
 func (e *Engine) BroadcastExecutionReceipt(ctx context.Context, receipt *flow.ExecutionReceipt) error {
-	finalState, ok := receipt.ExecutionResult.FinalStateCommitment()
-	if !ok {
-		return fmt.Errorf("could not get final state: no chunks found")
+	finalState, err := receipt.ExecutionResult.FinalStateCommitment()
+	if err != nil {
+		return fmt.Errorf("could not get final state: %w", err)
 	}
 
 	span, _ := e.tracer.StartSpanFromContext(ctx, trace.EXEBroadcastExecutionReceipt)
@@ -229,7 +279,7 @@ func (e *Engine) BroadcastExecutionReceipt(ctx context.Context, receipt *flow.Ex
 	e.log.Debug().
 		Hex("block_id", logging.ID(receipt.ExecutionResult.BlockID)).
 		Hex("receipt_id", logging.Entity(receipt)).
-		Hex("final_state", finalState).
+		Hex("final_state", finalState[:]).
 		Msg("broadcasting execution receipt")
 
 	identities, err := e.state.Final().Identities(filter.HasRole(flow.RoleAccess, flow.RoleConsensus,

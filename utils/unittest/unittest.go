@@ -11,6 +11,9 @@ import (
 	"github.com/dgraph-io/badger/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/onflow/flow-go/module"
+	"github.com/onflow/flow-go/module/lifecycle"
 )
 
 func ExpectPanic(expectedMsg string, t *testing.T) {
@@ -64,7 +67,21 @@ func RequireReturnsBefore(t testing.TB, f func(), duration time.Duration, messag
 		close(done)
 	}()
 
-	RequireCloseBefore(t, done, duration, "could not close done channel on time")
+	RequireCloseBefore(t, done, duration, message+": function did not return on time")
+}
+
+// RequireComponentsDoneBefore invokes the done method of each of the input components concurrently, and
+// fails the test if any components shutdown takes longer than the specified duration.
+func RequireComponentsDoneBefore(t testing.TB, duration time.Duration, components ...module.ReadyDoneAware) {
+	done := lifecycle.AllDone(components...)
+	RequireCloseBefore(t, done, duration, "failed to shutdown all components on time")
+}
+
+// RequireComponentsReadyBefore invokes the ready method of each of the input components concurrently, and
+// fails the test if any components startup takes longer than the specified duration.
+func RequireComponentsReadyBefore(t testing.TB, duration time.Duration, components ...module.ReadyDoneAware) {
+	ready := lifecycle.AllReady(components...)
+	RequireCloseBefore(t, ready, duration, "failed to start all components on time")
 }
 
 // RequireCloseBefore requires that the given channel returns before the
@@ -72,9 +89,18 @@ func RequireReturnsBefore(t testing.TB, f func(), duration time.Duration, messag
 func RequireCloseBefore(t testing.TB, c <-chan struct{}, duration time.Duration, message string) {
 	select {
 	case <-time.After(duration):
-		require.Fail(t, "function did not return in time: "+message)
+		require.Fail(t, "could not close done channel on time: "+message)
 	case <-c:
 		return
+	}
+}
+
+// RequireClosed is a test helper function that fails the test if channel `ch` is not closed.
+func RequireClosed(t *testing.T, ch <-chan struct{}, message string) {
+	select {
+	case <-ch:
+	default:
+		require.Fail(t, "channel is not closed: "+message)
 	}
 }
 
@@ -129,6 +155,15 @@ func RequireNeverClosedWithin(t *testing.T, ch <-chan struct{}, duration time.Du
 	}
 }
 
+// RequireNotClosed is a test helper function that fails the test if channel `ch` is closed.
+func RequireNotClosed(t *testing.T, ch <-chan struct{}, message string) {
+	select {
+	case <-ch:
+		require.Fail(t, "channel is closed: "+message)
+	default:
+	}
+}
+
 // AssertErrSubstringMatch asserts that two errors match with substring
 // checking on the Error method (`expected` must be a substring of `actual`, to
 // account for the actual error being wrapped). Fails the test if either error
@@ -180,4 +215,16 @@ func TempBadgerDB(t testing.TB) (*badger.DB, string) {
 	dir := TempDir(t)
 	db := BadgerDB(t, dir)
 	return db, dir
+}
+
+func Concurrently(n int, f func(int)) {
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			f(i)
+			wg.Done()
+		}(i)
+	}
+	wg.Wait()
 }

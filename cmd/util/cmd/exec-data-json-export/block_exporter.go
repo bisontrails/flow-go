@@ -20,9 +20,9 @@ type blockSummary struct {
 	BlockID        string   `json:"block_id"`
 	ParentBlockID  string   `json:"parent_block_id"`
 	ParentVoterIDs []string `json:"parent_voter_ids"`
-	// ParentVoterSig []string  `json:"parent_voter_sig"`
+	// ParentVoterSigData []string  `json:"parent_voter_sig"`
 	ProposerID string `json:"proposer_id"`
-	// ProposerSig    string  `json:"proposer_sig"`
+	// ProposerSigData    string  `json:"proposer_sig"`
 	Timestamp         time.Time `json:"timestamp"`
 	CollectionIDs     []string  `json:"collection_ids"`
 	SealedBlocks      []string  `json:"sealed_blocks"`
@@ -40,11 +40,11 @@ func ExportBlocks(blockID flow.Identifier, dbPath string, outputPath string) (fl
 	cacheMetrics := &metrics.NoopCollector{}
 	headers := badger.NewHeaders(cacheMetrics, db)
 	index := badger.NewIndex(cacheMetrics, db)
-	guarantees := badger.NewGuarantees(cacheMetrics, db)
+	guarantees := badger.NewGuarantees(cacheMetrics, db, badger.DefaultCacheSize)
 	seals := badger.NewSeals(cacheMetrics, db)
 	results := badger.NewExecutionResults(cacheMetrics, db)
-	receipts := badger.NewExecutionReceipts(cacheMetrics, db, results)
-	payloads := badger.NewPayloads(db, index, guarantees, seals, receipts)
+	receipts := badger.NewExecutionReceipts(cacheMetrics, db, results, badger.DefaultCacheSize)
+	payloads := badger.NewPayloads(db, index, guarantees, seals, receipts, results)
 	blocks := badger.NewBlocks(db, headers, payloads)
 	commits := badger.NewCommits(&metrics.NoopCollector{}, db)
 
@@ -53,7 +53,7 @@ func ExportBlocks(blockID flow.Identifier, dbPath string, outputPath string) (fl
 
 	fi, err := os.Create(outputFile)
 	if err != nil {
-		return nil, fmt.Errorf("could not create block output file %w", err)
+		return flow.DummyStateCommitment, fmt.Errorf("could not create block output file %w", err)
 	}
 	defer fi.Close()
 
@@ -107,11 +107,11 @@ func ExportBlocks(blockID flow.Identifier, dbPath string, outputPath string) (fl
 
 		jsonData, err := json.Marshal(b)
 		if err != nil {
-			return nil, fmt.Errorf("could not create a json obj for a block: %w", err)
+			return flow.DummyStateCommitment, fmt.Errorf("could not create a json obj for a block: %w", err)
 		}
 		_, err = blockWriter.WriteString(string(jsonData) + "\n")
 		if err != nil {
-			return nil, fmt.Errorf("could not write block json to the file: %w", err)
+			return flow.DummyStateCommitment, fmt.Errorf("could not write block json to the file: %w", err)
 		}
 		blockWriter.Flush()
 
@@ -120,7 +120,7 @@ func ExportBlocks(blockID flow.Identifier, dbPath string, outputPath string) (fl
 
 	state, err := commits.ByBlockID(blockID)
 	if err != nil {
-		return nil, fmt.Errorf("could not find state commitment for this block: %w", err)
+		return flow.DummyStateCommitment, fmt.Errorf("could not find state commitment for this block: %w", err)
 	}
 	return state, nil
 }

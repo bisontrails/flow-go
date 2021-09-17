@@ -48,14 +48,18 @@ const (
 	CONCompOnBlockProposalProcessSingle    SpanName = "con.compliance.onBlockProposal.processBlockProposal.single"
 
 	// Matching
-	CONMatchCheckSealing                        SpanName = "con.matching.checkSealing"
-	CONMatchCheckSealingSealableResults         SpanName = "con.matching.checkSealing.sealableResults"
-	CONMatchCheckSealingClearPools              SpanName = "con.matching.checkSealing.clearPools"
-	CONMatchCheckSealingRequestPendingReceipts  SpanName = "con.matching.checkSealing.requestPendingReceipts"
-	CONMatchCheckSealingRequestPendingApprovals SpanName = "con.matching.checkSealing.requestPendingApprovals"
-	CONMatchOnReceipt                           SpanName = "con.matching.onReceipt"
-	CONMatchOnReceiptVal                        SpanName = "con.matching.onReceipt.validation"
-	CONMatchOnApproval                          SpanName = "con.matching.onApproval"
+	CONMatchRequestPendingReceipts SpanName = "con.matching.requestPendingReceipts"
+	CONMatchProcessReceiptVal      SpanName = "con.matching.processReceipt.validation"
+	CONMatchProcessReceipt         SpanName = "con.matching.processReceipt"
+
+	// Sealing
+	CONSealingProcessFinalizedBlock           SpanName = "con.sealing.processFinalizedBlock"
+	CONSealingCheckForEmergencySealableBlocks SpanName = "con.sealing.processFinalizedBlock.checkEmergencySealing"
+	CONSealingPruning                         SpanName = "con.sealing.processFinalizedBlock.pruning"
+	CONSealingRequestingPendingApproval       SpanName = "con.sealing.processFinalizedBlock.requestPendingApprovals"
+
+	CONSealingProcessIncorporatedResult SpanName = "con.sealing.processIncorporatedResult"
+	CONSealingProcessApproval           SpanName = "con.sealing.processApproval"
 
 	// Builder
 	CONBuildOn                        SpanName = "con.builder"
@@ -100,18 +104,20 @@ const (
 	EXEComputeCollection       SpanName = "exe.computer.computeCollection"
 	EXEComputeSystemCollection SpanName = "exe.computer.computeSystemCollection"
 	EXEComputeTransaction      SpanName = "exe.computer.computeTransaction"
+	EXEMergeTransactionView    SpanName = "exe.computer.mergeTransactionView"
 
 	EXECommitDelta                        SpanName = "exe.state.commitDelta"
+	EXEGenerateChunkDataPacks             SpanName = "exe.state.generateChunkDataPacks"
 	EXEGetRegisters                       SpanName = "exe.state.getRegisters"
 	EXEGetRegistersWithProofs             SpanName = "exe.state.getRegistersWithProofs"
 	EXEPersistStateCommitment             SpanName = "exe.state.persistStateCommitment"
+	EXEPersistEvents                      SpanName = "exe.state.persistEvents"
 	EXEPersistChunkDataPack               SpanName = "exe.state.persistChunkDataPack"
 	EXEGetExecutionResultID               SpanName = "exe.state.getExecutionResultID"
 	EXEPersistExecutionResult             SpanName = "exe.state.persistExecutionResult"
-	EXEPersistStateInteractions           SpanName = "exe.state.persistStateInteractions"
-	EXERetrieveStateDelta                 SpanName = "exe.state.retrieveStateDelta"
 	EXEUpdateHighestExecutedBlockIfHigher SpanName = "exe.state.updateHighestExecutedBlockIfHigher"
 	EXEGetHighestExecutedBlockID          SpanName = "exe.state.getHighestExecutedBlockID"
+	EXEHashEvents                         SpanName = "exe.state.hashEvents"
 
 	// Verification node
 	//
@@ -122,6 +128,21 @@ const (
 	VERAssignerHandleExecutionReceipt SpanName = "ver.assigner.handleExecutionReceipt"
 	VERAssignerChunkAssignment        SpanName = "ver.assigner.chunkAssignment"
 	VERAssignerProcessChunk           SpanName = "ver.assigner.processChunk"
+
+	// fetcher engine
+	VERProcessAssignedChunk SpanName = "ver.processAssignedChunk"
+	// children of VERProcessAssignedChunk
+	VERFetcherHandleAssignedChunk   SpanName = "ver.fetcher.handleAssignedChunk"
+	VERFetcherHandleChunkDataPack   SpanName = "ver.fetcher.handleChunkDataPack"
+	VERFetcherValidateChunkDataPack SpanName = "ver.fetcher.validateChunkDataPack"
+	VERFetcherPushToVerifier        SpanName = "ver.fetcher.pushToVerifier"
+
+	// requester engine
+	VERProcessChunkDataPackRequest SpanName = "ver.processChunkDataPackRequest"
+	// children of VERProcessChunkDataPackRequest
+	VERRequesterHandleChunkDataRequest   SpanName = "ver.requester.handleChunkDataRequest"
+	VERRequesterHandleChunkDataResponse  SpanName = "ver.requester.handleChunkDataResponse"
+	VERRequesterDispatchChunkDataRequest SpanName = "ver.requester.dispatchChunkDataRequest"
 
 	VERProcessExecutionReceipt SpanName = "ver.processExecutionReceipt"
 	// children of VERProcessExecutionReceipt
@@ -143,9 +164,13 @@ const (
 	VERVerGenerateResultApproval  SpanName = "ver.verify.GenerateResultApproval"
 
 	// Flow Virtual Machine
-	FVMVerifyTransaction            SpanName = "fvm.verifyTransaction"
-	FVMSeqNumCheckTransaction       SpanName = "fvm.seqNumCheckTransaction"
-	FVMExecuteTransaction           SpanName = "fvm.executeTransaction"
+	FVMVerifyTransaction             SpanName = "fvm.verifyTransaction"
+	FVMSeqNumCheckTransaction        SpanName = "fvm.seqNumCheckTransaction"
+	FVMExecuteTransaction            SpanName = "fvm.executeTransaction"
+	FVMDeductTransactionFees         SpanName = "fvm.deductTransactionFees"
+	FVMInvokeContractFunction        SpanName = "fvm.invokeContractFunction"
+	FVMFrozenAccountCheckTransaction SpanName = "fvm.frozenAccountCheckTransaction"
+
 	FVMEnvHash                      SpanName = "fvm.env.Hash"
 	FVMEnvValueExists               SpanName = "fvm.env.valueExists"
 	FVMEnvGetValue                  SpanName = "fvm.env.getValue"
@@ -155,6 +180,7 @@ const (
 	FVMEnvGetAccountBalance         SpanName = "fvm.env.getAccountBalance"
 	FVMEnvResolveLocation           SpanName = "fvm.env.resolveLocation"
 	FVMEnvGetCode                   SpanName = "fvm.env.getCode"
+	FVMEnvGetAccountContractNames   SpanName = "fvm.env.getAccountContractNames"
 	FVMEnvGetProgram                SpanName = "fvm.env.getCachedProgram"
 	FVMEnvSetProgram                SpanName = "fvm.env.cacheProgram"
 	FVMEnvProgramLog                SpanName = "fvm.env.programLog"
@@ -167,17 +193,14 @@ const (
 	FVMEnvGetBlockAtHeight          SpanName = "fvm.env.getBlockAtHeight"
 	FVMEnvCreateAccount             SpanName = "fvm.env.createAccount"
 	FVMEnvAddAccountKey             SpanName = "fvm.env.addAccountKey"
+	FVMEnvGetAccountKey             SpanName = "fvm.env.getAccountKey"
 	FVMEnvRemoveAccountKey          SpanName = "fvm.env.removeAccountKey"
 	FVMEnvUpdateAccountContractCode SpanName = "fvm.env.updateAccountContractCode"
 	FVMEnvGetAccountContractCode    SpanName = "fvm.env.getAccountContractCode"
 	FVMEnvRemoveAccountContractCode SpanName = "fvm.env.removeAccountContractCode"
 	FVMEnvGetSigningAccounts        SpanName = "fvm.env.getSigningAccounts"
 
-	FVMCadenceParseProgram     SpanName = "fvm.cadence.parseProgram"
-	FVMCadenceCheckProgram     SpanName = "fvm.cadence.checkProgram"
-	FVMCadenceInterpretProgram SpanName = "fvm.cadence.interpretProgram"
-	FVMCadenceEncodeValue      SpanName = "fvm.cadence.encodeValue"
-	FVMCadenceDecodeValue      SpanName = "fvm.cadence.decodeValue"
+	FVMCadenceTrace SpanName = "fvm.cadence.trace"
 )
 
 // Tag names

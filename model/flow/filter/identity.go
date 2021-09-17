@@ -3,6 +3,7 @@
 package filter
 
 import (
+	"github.com/onflow/flow-go/crypto"
 	"github.com/onflow/flow-go/model/flow"
 )
 
@@ -61,6 +62,19 @@ func HasNodeID(nodeIDs ...flow.Identifier) flow.IdentityFilter {
 	}
 }
 
+// HasNetworkingKey returns a filter that returns true for any identity with a
+// networking public key matching any of the inputs.
+func HasNetworkingKey(keys ...crypto.PublicKey) flow.IdentityFilter {
+	return func(identity *flow.Identity) bool {
+		for _, key := range keys {
+			if key.Equals(identity.NetworkPubKey) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 // HasStake returns a filter for nodes with non-zero stake.
 func HasStake(hasStake bool) flow.IdentityFilter {
 	return func(identity *flow.Identity) bool {
@@ -85,10 +99,21 @@ func HasRole(roles ...flow.Role) flow.IdentityFilter {
 	}
 }
 
+// IsValidCurrentEpochParticipant is an identity filter for members of the
+// current epoch in good standing.
+var IsValidCurrentEpochParticipant = And(
+	HasStake(true),
+	Not(Ejected),
+)
+
 // IsVotingConsensusCommitteeMember is a identity filter for all members of
 // the consensus committee allowed to vote.
 var IsVotingConsensusCommitteeMember = And(
 	HasRole(flow.RoleConsensus),
-	HasStake(true),
-	Not(Ejected),
+	IsValidCurrentEpochParticipant,
 )
+
+// IsValidDKGParticipant is an identity filter for all DKG participants. It is
+// equivalent to the filter for consensus committee members, as these are
+// the same group for now.
+var IsValidDKGParticipant = IsVotingConsensusCommitteeMember
